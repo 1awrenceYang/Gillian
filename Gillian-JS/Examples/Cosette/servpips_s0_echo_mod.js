@@ -2,6 +2,9 @@
    itself). */
 var inner = require("./servpips_s0_echo_mod2.js");
 
+/* special form at module top level (module initialisation) */
+exports.init = __servpips_echo("init");
+
 exports.echo = function (v) {
   return __servpips_echo(v);
 };

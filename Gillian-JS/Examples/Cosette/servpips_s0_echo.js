@@ -16,7 +16,9 @@ var s = symb_string();
 var a = __servpips_echo(x);
 Assert(a = x);
 
-/* required module */
+/* required module: at module initialisation and inside a function */
+var iv = m.init;
+Assert(iv = "init");
 var b = m.echo(s);
 Assert(b = s);
 
