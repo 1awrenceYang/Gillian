@@ -17,3 +17,14 @@ val lift_model :
   unit
 
 val pp_sexp : Sexplib.Sexp.t Fmt.t
+
+(** Current per-query solver timeout in milliseconds ([None] if the value taken
+    from the [SMT_TIMEOUT] environment variable is not an integer). *)
+val timeout_ms : unit -> int option
+
+(** Change the per-query solver timeout (milliseconds). Applies to the running
+    solver immediately and to any restarted solver. *)
+val set_timeout_ms : int -> unit
+
+(** Version string reported by the solver ([(get-info :version)]). *)
+val solver_version : unit -> string

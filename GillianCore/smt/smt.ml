@@ -11,13 +11,19 @@ exception SMT_error of string
 
 let exceptf fmt = Fmt.kstr (fun s -> raise (SMT_error s)) fmt
 
-let z3_config =
+(* Per-query solver timeout (ms), sent as [(set-option :timeout ...)]. Initially
+   taken from the SMT_TIMEOUT environment variable; can be changed at run time
+   with [set_timeout_ms] (e.g. by the [--smt-timeout] command-line flag). *)
+let smt_timeout =
+  ref (try Sys.getenv "SMT_TIMEOUT" with Not_found -> "30000")
+
+let z3_config () =
   [
     ("model", "true");
     ("proof", "false");
     ("unsat_core", "false");
     ("auto_config", "true");
-    ("timeout", try Sys.getenv "SMT_TIMEOUT" with Not_found -> "30000");
+    ("timeout", !smt_timeout);
   ]
 
 let () = Sys.(set_signal sigpipe Signal_ignore)
@@ -221,7 +227,7 @@ let rec init_solver () =
   let () = solver := { z3 with command } in
   (* Configuration *)
   let () =
-    z3_config |> List.iter (fun (k, v) -> cmd (set_option (":" ^ k) v))
+    z3_config () |> List.iter (fun (k, v) -> cmd (set_option (":" ^ k) v))
   in
   ()
 
@@ -1724,3 +1730,15 @@ let lift_model
          v |> Option.iter (fun v -> subst_update x (Expr.Lit v)))
 
 let () = init_solver ()
+
+let timeout_ms () = int_of_string_opt (String.trim !smt_timeout)
+
+let set_timeout_ms (ms : int) =
+  let v = string_of_int ms in
+  smt_timeout := v;
+  cmd (set_option ":timeout" v)
+
+let solver_version () =
+  match !solver.command (list [ atom "get-info"; atom ":version" ]) with
+  | Sexplib.Sexp.List [ Sexplib.Sexp.Atom ":version"; Sexplib.Sexp.Atom v ] -> v
+  | s -> Fmt.str "%a" pp_sexp s

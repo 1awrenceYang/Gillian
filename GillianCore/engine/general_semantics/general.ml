@@ -62,3 +62,9 @@ module Recovery_tactic = struct
   (** @inline *)
   include Recovery_tactic
 end
+
+(** @canonical Gillian.General.Servpips *)
+module Servpips = struct
+  (** @inline *)
+  include Servpips
+end

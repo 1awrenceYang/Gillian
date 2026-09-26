@@ -62,6 +62,10 @@ end
 
 module Abductor = Engine.Abductor
 
+(** SERVPIPS mode (structured JSONL output); same module as
+    {!General.Servpips}. *)
+module Servpips = Engine.General.Servpips
+
 (* module Test262 = Test262_main *)
 
 (** Modules for logging (to the file log and the report database) *)

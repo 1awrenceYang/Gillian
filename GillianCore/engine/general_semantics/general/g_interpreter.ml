@@ -1771,6 +1771,19 @@ struct
   let simplify state =
     snd (State.simplify ~save:true ~kill_new_lvars:true state)
 
+  (* SERVPIPS: emit the [end] event of a configuration stopped by
+     [Servpips.Path_end]; [state] is the state before the command. *)
+  let servpips_path_end (state : State.t) ~status ~reason =
+    if Servpips.enabled () then
+      let pc, types =
+        try
+          Servpips.pc_and_types_of_asrt
+            (State.to_assertions ~to_keep:Containers.SS.empty state)
+        with _ -> ([], [])
+      in
+      Servpips.emit_end ~status ~reason ~pc ~types ()
+    else Printf.eprintf "SERVPIPS: path end (%s): %s\n%!" status reason
+
   let protected_evaluate_cmd
       (prog : annot MP.prog)
       (state : State.t)
@@ -1823,7 +1836,12 @@ struct
                   prev_cmd_report_id = !report_id_ref;
                   loc = !last_known_loc;
                 };
-            ])
+            ]
+        | Servpips.Path_end { status; reason } ->
+            (* SERVPIPS: an extern (or engine hook) ended this configuration.
+               Report it as an [end] event and drop the configuration. *)
+            servpips_path_end state ~status ~reason;
+            [])
       states
 
   (**
