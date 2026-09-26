@@ -232,6 +232,7 @@ module Make
       json_ui
       unroll
       leak_check
+      servpips_opts
       () =
     let () = Fmt_tty.setup_std_outputs () in
     let () = Config.json_ui := json_ui in
@@ -243,6 +244,7 @@ module Make
     let () = Config.leak_check := leak_check in
     let () = PC.initialize Symbolic in
     let () = Config.max_branching := unroll in
+    let () = Common_args.apply_servpips_opts ~unroll servpips_opts in
     let r =
       Gillian_result.try_ @@ fun () ->
       process_files files already_compiled outfile_opt incremental
@@ -256,7 +258,8 @@ module Make
   let wpst_t =
     Term.(
       const wpst $ files $ already_compiled $ output_gil $ no_heap $ stats
-      $ incremental $ entry_point $ json_ui $ unroll_depth $ check_leaks)
+      $ incremental $ entry_point $ json_ui $ unroll_depth $ check_leaks
+      $ Common_args.servpips_opts)
 
   let wpst_info =
     let doc = "Symbolically executes a file of the target language" in

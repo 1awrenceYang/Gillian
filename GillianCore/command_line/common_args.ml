@@ -158,6 +158,126 @@ module Make (PC : ParserAndCompiler.S) = struct
     let doc = "Dump annotations produced in compilation" in
     Arg.(value & flag & info [ "dump-annots" ] ~doc)
 
+  (** {2 SERVPIPS options} (see [Engine.Servpips]) *)
+
+  type servpips_opts = {
+    sp_enabled : bool;
+    sp_log : string option;
+    sp_runtime : string option;
+    sp_shard : string option;
+    sp_smt_timeout : int option;
+  }
+
+  let servpips_opts =
+    let docs = "SERVPIPS OPTIONS" in
+    let enabled =
+      let doc =
+        "Enable SERVPIPS mode: write structured JSONL events (hello, end, \
+         note, ...) to the file given by $(b,--servpips-log)."
+      in
+      Arg.(value & flag & info [ "servpips" ] ~docs ~doc)
+    in
+    let log =
+      let doc =
+        Printf.sprintf
+          "SERVPIPS JSONL output file (truncated at start). Defaults to \
+           \"%s\". Requires $(b,--servpips)."
+          Servpips.default_log_path
+      in
+      Arg.(
+        value
+        & opt (some string) None
+        & info [ "servpips-log" ] ~docs ~doc ~docv:"FILE")
+    in
+    let runtime =
+      let doc =
+        "SERVPIPS runtime directory containing the preamble.js used for \
+         CommonJS programs (overrides GILLIAN_JS_RUNTIME_PATH for the preamble). \
+         Requires $(b,--servpips)."
+      in
+      Arg.(
+        value
+        & opt (some string) None
+        & info [ "servpips-runtime" ] ~docs ~doc ~docv:"DIR")
+    in
+    let shard =
+      let doc =
+        "SERVPIPS shard descriptor (a JSON value, echoed in the hello event). \
+         Requires $(b,--servpips)."
+      in
+      Arg.(
+        value
+        & opt (some string) None
+        & info [ "servpips-shard" ] ~docs ~doc ~docv:"JSON")
+    in
+    let smt_timeout =
+      let doc =
+        "Per-query SMT solver timeout in milliseconds. Defaults to the \
+         SMT_TIMEOUT environment variable, or 30000."
+      in
+      Arg.(
+        value
+        & opt (some int) None
+        & info [ "smt-timeout" ] ~docs ~doc ~docv:"MS")
+    in
+    let f sp_enabled sp_log sp_runtime sp_shard sp_smt_timeout =
+      { sp_enabled; sp_log; sp_runtime; sp_shard; sp_smt_timeout }
+    in
+    Term.(const f $ enabled $ log $ runtime $ shard $ smt_timeout)
+
+  (** Applies the SERVPIPS options: sets the SMT timeout, and, when
+      [--servpips] is given, enables SERVPIPS mode and emits the [hello]
+      event. Without [--servpips] (and without [--smt-timeout]) nothing
+      changes. Usage errors exit with code 124. *)
+  let apply_servpips_opts ~unroll (o : servpips_opts) =
+    let usage_error msg =
+      Fmt.epr "gillian: %s@." msg;
+      exit 124
+    in
+    Option.iter
+      (fun ms ->
+        if ms < 0 then usage_error "--smt-timeout must be non-negative";
+        Smt.set_timeout_ms ms)
+      o.sp_smt_timeout;
+    if not o.sp_enabled then (
+      let needs_flag name = function
+        | Some _ -> usage_error (name ^ " requires --servpips")
+        | None -> ()
+      in
+      needs_flag "--servpips-log" o.sp_log;
+      needs_flag "--servpips-runtime" o.sp_runtime;
+      needs_flag "--servpips-shard" o.sp_shard)
+    else
+      let shard_json =
+        match o.sp_shard with
+        | None -> `Null
+        | Some s -> (
+            try Yojson.Safe.from_string s
+            with Yojson.Json_error e ->
+              usage_error ("--servpips-shard is not valid JSON: " ^ e))
+      in
+      Option.iter
+        (fun d ->
+          if not (Sys.file_exists d && Sys.is_directory d) then
+            usage_error ("--servpips-runtime: not a directory: " ^ d))
+        o.sp_runtime;
+      let smt_timeout_ms =
+        match o.sp_smt_timeout with
+        | Some ms -> ms
+        | None -> Option.value (Smt.timeout_ms ()) ~default:(-1)
+      in
+      let log_path = Option.value o.sp_log ~default:Servpips.default_log_path in
+      (try
+         Servpips.enable
+           {
+             log_path;
+             runtime_dir = o.sp_runtime;
+             shard_json;
+             smt_timeout_ms;
+           }
+       with Sys_error e -> usage_error ("--servpips-log: " ^ e));
+      Servpips.hello ~unroll ()
+
   let use (term : (unit -> unit) Term.t) : unit Term.t =
     let apply_common
         logging_mode
