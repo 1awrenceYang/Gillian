@@ -291,6 +291,18 @@ let exists (vars : (string * sexp) list) (s : sexp) : sexp =
   exists' vars s
 
 let t_seq t = list [ atom "Seq"; t ]
+let t_string = atom "String"
+
+(* SERVPIPS: SMT-LIB string literal. simple_smt prints sexps with Sexplib,
+   whose atom quoting is OCaml-style and not SMT-LIB-style, so literals are
+   built from character codes instead of quoted atoms. *)
+let string_k (s : string) : sexp =
+  let ch c = atom "str.from_code" $$ [ int_k (Char.code c) ] in
+  match String.length s with
+  | 0 -> atom "str.from_code" $$ [ atom "-" $$ [ int_k 1 ] ]
+  | 1 -> ch s.[0]
+  | _ -> atom "str.++" $$ List.init (String.length s) (fun i -> ch s.[i])
+
 let seq_len s = atom "seq.len" <| s
 let seq_extract s offset length = atom "seq.extract" $$ [ s; offset; length ]
 let seq_nth s offset = atom "seq.nth" $$ [ s; offset ]
@@ -418,7 +430,7 @@ module Lit_operations = struct
   module Bool = (val un "Bool" "bValue" t_bool : Unary)
   module Int = (val un "Int" "iValue" t_int : Unary)
   module Num = (val un "Num" "nValue" t_real : Unary)
-  module String = (val un "String" "sValue" t_int : Unary)
+  module String = (val un "String" "sValue" t_string : Unary)
   module Loc = (val un "Loc" "locValue" t_int : Unary)
   module Type = (val un "Type" "tValue" t_gil_type : Unary)
   module List = (val un "List" "listValue" (t_seq t_gil_literal) : Unary)
@@ -458,7 +470,8 @@ let t_gil_literal_set = t_set t_gil_literal
 let native_sort_of_type =
   let open Type in
   function
-  | IntType | StringType | ObjectType -> t_int
+  | IntType | ObjectType -> t_int
+  | StringType -> t_string
   | ListType ->
       require_definition def_gil_literal;
       t_gil_literal_list
@@ -564,16 +577,17 @@ module Ext_lit_operations = struct
 end
 
 module Axiomatised_operations = struct
-  let slen, def_slen = mk_fun_decl "s-len" [ t_int ] t_real
+  let[@warning "-32"] slen, def_slen = mk_fun_decl "s-len" [ t_string ] t_real
 
   let llen, def_llen =
     mk_fun_decl ~depends_on:[ def_gil_literal ] "l-len" [ t_gil_literal_list ]
       t_int
 
-  let num2str, def_num2str = mk_fun_decl "num2str" [ t_real ] t_int
-  let str2num, def_str2num = mk_fun_decl "str2num" [ t_int ] t_real
+  let num2str, def_num2str = mk_fun_decl "num2str" [ t_real ] t_string
+  let str2num, def_str2num = mk_fun_decl "str2num" [ t_string ] t_real
   let num2int, def_num2int = mk_fun_decl "num2int" [ t_real ] t_real
-  let snth, def_snth = mk_fun_decl "s-nth" [ t_int; t_real ] t_int
+  let[@warning "-32"] snth, def_snth =
+    mk_fun_decl "s-nth" [ t_string; t_real ] t_string
 
   let lrev, def_lrev =
     mk_fun_decl ~depends_on:[ def_gil_literal ] "l-rev" [ t_gil_literal_list ]
@@ -901,7 +915,7 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
     | Bool b -> bool_k b >- BooleanType
     | Int i -> int_zk i >- IntType
     | Num n -> real_k (Q.of_float n) >- NumberType
-    | String s -> encode_string s >- StringType
+    | String s -> string_k s >- StringType
     | Loc l -> encode_string l >- ObjectType
     | Type t -> encode_type t >- TypeType
     | LList lits ->
@@ -1037,13 +1051,21 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- n = get_int p2 in
       RepeatCache.get x.expr n.expr
   | StrNth ->
-      require_definition Axiomatised_operations.def_snth;
       let>- str' = get_string p1 in
       let>- index' = get_num p2 in
-      let res = Axiomatised_operations.snth $$ [ str'.expr; index'.expr ] in
+      let res =
+        atom "str.at" $$ [ str'.expr; atom "to_int" <| index'.expr ]
+      in
       res >- StringType
+  | StrLess ->
+      let>- p1 = get_string p1 in
+      let>- p2 = get_string p2 in
+      atom "str.<" $$ [ p1.expr; p2.expr ] >- BooleanType
+  | StrCat ->
+      let>- p1 = get_string p1 in
+      let>- p2 = get_string p2 in
+      atom "str.++" $$ [ p1.expr; p2.expr ] >- StringType
   | FMod
-  | StrLess
   | BitwiseAnd
   | BitwiseOr
   | BitwiseXor
@@ -1063,8 +1085,7 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | SignedRightShiftF
   | UnsignedRightShiftF
   | M_atan2
-  | M_pow
-  | StrCat ->
+  | M_pow ->
       exceptf "SMT encoding: Costruct not supported yet - binop: %s"
         (BinOp.str op)
 
@@ -1091,9 +1112,8 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       in
       enc >- IntType
   | StrLen ->
-      require_definition def_slen;
       let>- le = get_string le in
-      slen <| le.expr >- NumberType
+      atom "to_real" <| (atom "str.len" <| le.expr) >- NumberType
   | ToStringOp ->
       require_definition def_num2str;
       let>- le = get_num le in
@@ -1673,10 +1693,11 @@ let lift_model
     | IntType ->
         let+ n = recover_int v in
         Literal.Int n
-    | StringType ->
-        let* si = recover_int v in
-        let+ str_code = Hashtbl.find_opt str_codes_inv (Z.to_int si) in
-        Literal.String str_code
+    | StringType -> (
+        (* z3 prints string values as "..." which Sexplib reads as an atom *)
+        match v with
+        | Sexplib.Sexp.Atom a -> Some (Literal.String a)
+        | _ -> None)
     | _ -> None
   in
 
