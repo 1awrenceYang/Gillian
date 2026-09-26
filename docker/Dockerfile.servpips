@@ -48,11 +48,14 @@ RUN opam update -y \
 FROM deps AS build
 ARG JOBS=8
 COPY --chown=opam:opam . .
-RUN sudo mkdir -p /opt/gillian && sudo chown opam:opam /opt/gillian
+# `dune install --relocatable` needs a relative prefix: the binary then finds
+# its sites (share/gillian-js/runtime) relative to its own location.
 RUN --mount=type=cache,id=servpips-gillian-build,target=/home/opam/app/Gillian/_build,uid=1000,gid=1000,sharing=locked \
     opam exec -- dune build -j ${JOBS} --only-packages gillian,gillian-js @install \
-    && opam exec -- dune install --relocatable --prefix /opt/gillian gillian-js \
-    && rm -rf /opt/gillian/lib /opt/gillian/doc \
+    && rm -rf _dist \
+    && opam exec -- dune install --relocatable --prefix ./_dist gillian-js \
+    && rm -rf _dist/lib _dist/doc \
+    && sudo mv _dist /opt/gillian \
     && test -x /opt/gillian/bin/gillian-js \
     && test -f /opt/gillian/share/gillian-js/preamble.js \
     && test -f /opt/gillian/share/gillian-js/runtime/Internals.jsil
