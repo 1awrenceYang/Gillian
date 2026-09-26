@@ -25,8 +25,16 @@ let unfold_prog prog =
   | GJS_syntax.Script (use_strict, exp_list) -> (use_strict, exp_list)
   | _ -> failwith "expected expression to be a Script"
 
+(* SERVPIPS: when set, the preamble is read from this directory instead of
+   $GILLIAN_JS_RUNTIME_PATH (set from [--servpips-runtime]). *)
+let preamble_dir_override : string option ref = ref None
+
 let get_preamble () =
-  let runtime_dir = Sys.getenv Config.runtime_path in
+  let runtime_dir =
+    match !preamble_dir_override with
+    | Some dir -> dir
+    | None -> Sys.getenv Config.runtime_path
+  in
   let preamble_path = Filename.concat runtime_dir Config.preamble_file in
   let prog_string = load_file preamble_path in
   let prog, errors = Flow_parser.Parser_flow.program ~fail:false prog_string in

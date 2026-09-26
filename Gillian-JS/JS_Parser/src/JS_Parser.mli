@@ -192,6 +192,11 @@ module Error : sig
   exception ParserError of t
 end
 
+(** When [Some dir], the CommonJS preamble ([preamble.js], prepended to
+    programs that [require] other modules) is read from [dir] instead of the
+    directory named by the [GILLIAN_JS_RUNTIME_PATH] environment variable. *)
+val preamble_dir_override : string option ref
+
 (** [parse_string_exn ~parse_annotations ~force_strict prog] parses the given
     string as a program. The string given should be the entire program. If
     [parse_annotations] is set to [false], any possible JS_Logic annotations in

@@ -3,6 +3,8 @@ module PrettyPrint = PrettyPrint
 module Error = Error
 module Loc = Loc
 
+let preamble_dir_override = Modules.preamble_dir_override
+
 let parse_string_exn
     ?(parse_annotations = true)
     ?(force_strict = false)

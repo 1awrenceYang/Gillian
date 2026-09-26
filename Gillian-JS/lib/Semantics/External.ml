@@ -187,121 +187,55 @@ struct
 
 
   (* ---------------------------------------------------------------------- *)
-  (* SERVPIPS experiment: [__servpips_log(tag, v1, ..., vn)] from JS.        *)
-  (* Appends one JSON line per invocation (per symbolic path) to the file   *)
-  (* named by $SERVPIPS_LOG (default servpips_log.jsonl) containing the     *)
-  (* symbolic values of the arguments (objects are walked through the JS    *)
-  (* memory actions GetAllProps/GetCell) and the current path condition.   *)
+  (* SERVPIPS externs: every extern named "servpips_*" (compiled from a JS  *)
+  (* call [__servpips_*(...)]) is forwarded to the ServpipsExterns          *)
+  (* registry. See ServpipsExterns.mli for the calling convention.          *)
   (* ---------------------------------------------------------------------- *)
-  module SExpr = Gillian.Gil_syntax.Expr
-  module SAsrt = Gillian.Gil_syntax.Asrt
 
-  let servpips_chan =
-    lazy
-      (let path =
-         Option.value (Sys.getenv_opt "SERVPIPS_LOG")
-           ~default:"servpips_log.jsonl"
-       in
-       open_out_gen [ Open_append; Open_creat; Open_wronly ] 0o666 path)
+  let servpips_env (name : string) (cs : Call_stack.t) (i : int) :
+      (module ServpipsExterns.ENV with type st = State.t and type vt = Val.t) =
+    (module struct
+      type st = State.t
+      type vt = Val.t
 
-  let expr_json (e : SExpr.t) : Yojson.Safe.t =
-    `Assoc
-      [
-        ("pp", `String (Fmt.to_to_string SExpr.pp e));
-        ("ast", SExpr.to_yojson e);
-      ]
+      module Val = Val
+      module State = State
 
-  let rec servpips_serialise state depth (v : Val.t) : Yojson.Safe.t =
-    let e = Val.to_expr v in
-    let is_loc =
-      match e with
-      | SExpr.Lit (Loc _) | SExpr.ALoc _ -> true
-      | _ -> false
-    in
-    if (not is_loc) || depth > 8 then expr_json e
-    else
-      try
-        match State.execute_action "GetAllProps" state [ v ] with
-        | [ Ok (_, [ _; props ]) ] -> (
-            match Val.to_list props with
-            | Some props ->
-                let fields =
-                  List.filter_map
-                    (fun p ->
-                      match Val.to_literal p with
-                      | Some (String pname)
-                        when String.length pname > 0 && pname.[0] <> '@' -> (
-                          match
-                            State.execute_action "GetCell" state [ v; p ]
-                          with
-                          | [ Ok (_, [ _; _; ffv ]) ] -> (
-                              match Val.to_list ffv with
-                              | Some (_ :: value :: _) ->
-                                  Some
-                                    ( pname,
-                                      servpips_serialise state (depth + 1)
-                                        value )
-                              | _ -> Some (pname, expr_json (Val.to_expr ffv)))
-                          | _ -> Some (pname, `String "<GetCell: branching>"))
-                      | _ -> None)
-                    props
-                in
-                `Assoc [ ("loc", expr_json e); ("object", `Assoc fields) ]
-            | None -> expr_json e)
-        | _ -> `Assoc [ ("loc", expr_json e); ("object", `String "<unknown>") ]
-      with exn ->
-        `Assoc
-          [
-            ("loc", expr_json e);
-            ("object", `String ("<error: " ^ Printexc.to_string exn ^ ">"));
-          ]
+      let symbolic =
+        not (Exec_mode.is_concrete_exec !Config.current_exec_mode)
 
-  let servpips_log state cs i x v_args =
-    let asrt = State.to_assertions ~to_keep:Containers.SS.empty state in
-    let pure =
-      List.filter_map
-        (function
-          | SAsrt.Pure f -> Some f
-          | _ -> None)
-        asrt
-    in
-    let types =
-      List.concat_map
-        (function
-          | SAsrt.Types l -> l
-          | _ -> [])
-        asrt
-    in
-    let tag, rest =
-      match v_args with
-      | t :: rest -> (Fmt.to_to_string Val.pp t, rest)
-      | [] -> ("", [])
-    in
-    let json =
-      `Assoc
-        [
-          ("tag", `String tag);
-          ("proc", `String (Call_stack.get_cur_proc_id cs));
-          ("args", `List (List.map (servpips_serialise state 0) rest));
-          ("pc", `List (List.map expr_json pure));
-          ( "types",
-            `List
-              (List.map
-                 (fun (e, t) ->
-                   `List
-                     [
-                       `String (Fmt.to_to_string SExpr.pp e);
-                       `String (Gillian.Gil_syntax.Type.str t);
-                     ])
-                 types) );
-        ]
-    in
-    let oc = Lazy.force servpips_chan in
-    output_string oc (Yojson.Safe.to_string json);
-    output_char oc '\n';
-    flush oc;
-    let state = update_store state x (Val.from_literal Undefined) in
-    [ (state, cs, i, i + 1) ]
+      let extern = name
+      let proc = Call_stack.get_cur_proc_id cs
+      let idx = i
+    end)
+
+  let servpips_extern name state cs i x v_args j =
+    match ServpipsExterns.find name with
+    | None ->
+        raise
+          (Gillian.General.Servpips.Path_end
+             {
+               status = "unsupported";
+               reason = "unregistered servpips extern " ^ name;
+             })
+    | Some h ->
+        let outcomes = h.run (servpips_env name cs i) state v_args in
+        List.map
+          (function
+            | ServpipsExterns.Return (st, v) -> (update_store st x v, cs, i, i + 1)
+            | ServpipsExterns.Throw (st, v) -> (
+                match j with
+                | Some j -> (update_store st x v, cs, i, j)
+                | None ->
+                    raise
+                      (Gillian.General.Servpips.Path_end
+                         {
+                           status = "error";
+                           reason =
+                             "servpips extern " ^ name
+                             ^ " threw but the call has no error label";
+                         })))
+          outcomes
 
   (** General External Procedure Treatment
 
@@ -327,6 +261,9 @@ struct
     | "ExecuteEval" -> execute_eval prog state cs i x v_args j
     | "ExecuteFunctionConstructor" ->
         execute_function_constructor prog state cs i x v_args j
-    | "ServpipsLog" -> servpips_log state cs i x v_args
+    (* Prototype name of servpips_log, kept for compatibility. *)
+    | "ServpipsLog" -> servpips_extern "servpips_log" state cs i x v_args j
+    | _ when ServpipsExterns.is_servpips_extern pid ->
+        servpips_extern pid state cs i x v_args j
     | _ -> raise (Failure ("Unsupported external procedure call: " ^ pid))
 end

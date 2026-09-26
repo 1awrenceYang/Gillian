@@ -63,6 +63,12 @@ let create_compilation_result path prog tl_prog =
   }
 
 let parse_and_compile_js path =
+  (* SERVPIPS: --servpips-runtime DIR provides the CommonJS preamble. *)
+  let () =
+    if Gillian.General.Servpips.enabled () then
+      JS_Parser.preamble_dir_override :=
+        (Gillian.General.Servpips.config ()).runtime_dir
+  in
   try
     let e_str = Javert_utils.Io_utils.load_js_file path in
     let e_str =

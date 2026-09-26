@@ -774,6 +774,16 @@ let annotate_cmd_top_level metadata lcmd =
 let annotate_cmds_top_level metadata cmds =
   List.map (annotate_cmd_top_level metadata) cmds
 
+(** SERVPIPS special forms: a call whose callee is the bare identifier
+    [__servpips_<name>] (non-empty [<name>]) is compiled to the extern call
+    [servpips_<name>]; returns that extern name. *)
+let servpips_special_form (f_name : string) : string option =
+  let js_prefix = "__servpips_" in
+  let n = String.length js_prefix in
+  if String.length f_name > n && String.starts_with ~prefix:js_prefix f_name
+  then Some ("servpips_" ^ String.sub f_name n (String.length f_name - n))
+  else None
+
 (*
   *  translate_expr( tr_ctx, e) = cmds, e', x_is
      @param tr_ctx  translation context
@@ -2213,17 +2223,25 @@ let rec translate_expr tr_ctx e :
         (metadata, None, LLogic (LCmd.AssumeType (x_v, Type.BooleanType)))
       in
       ([ cmd1; cmd2 ], x_v, [])
-  | JS_Parser.Syntax.Call (e_f, xes)
-    when e_f.JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var "__servpips_log"
-    ->
-      (* SERVPIPS experiment: external logging call, see Semantics/External.ml *)
+  | JS_Parser.Syntax.Call
+      ({ JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var f_name; _ }, xes)
+    when servpips_special_form f_name <> None ->
+      (* SERVPIPS special form: [__servpips_<name>(a1, ..., an)] (callee is
+         that bare identifier, in any module) is compiled to
+           x_r := extern "servpips_<name>"(v1, ..., vn) with err
+         where v1 .. vn are the argument values, evaluated left to right with
+         GetValue applied. The value of the call is the extern's result; if
+         the extern throws, control goes to the current error label. The
+         externs are dispatched by Semantics/External.ml to the registry in
+         Semantics/ServpipsExterns.ml. *)
+      let extern_name = Option.get (servpips_special_form f_name) in
       let cmds_args, proc_args, errs_args =
         translate_arg_list xes tr_ctx.tr_err_lab
       in
       let x_r = fresh_var () in
       let cmd =
         LECall
-          (x_r, Lit (String "ServpipsLog"), proc_args, Some tr_ctx.tr_err_lab)
+          (x_r, Lit (String extern_name), proc_args, Some tr_ctx.tr_err_lab)
       in
       (cmds_args @ [ (metadata, None, cmd) ], PVar x_r, errs_args @ [ x_r ])
   | JS_Parser.Syntax.Call (e_f, xes)
@@ -7319,6 +7337,7 @@ let compute_imports (for_verification : bool) : string list =
   else if
     Exec_mode.is_symbolic_exec !Config.current_exec_mode
     && Option.is_none (Sys.getenv_opt "SERVPIPS_FULL_INIT")
+    && not (Gillian.General.Servpips.enabled ())
   then js2jsil_imports_cosette
   else js2jsil_imports
 
