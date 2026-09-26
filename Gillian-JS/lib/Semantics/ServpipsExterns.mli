@@ -46,6 +46,19 @@
     input state, copy it first ([E.State.copy]) so that the branches do not
     share mutable parts.
 
+    The state type is abstract for the handler (the same handler serves the
+    concrete and the symbolic interpreters). Useful operations of
+    [E.State]: [assume] (add a pure formula; [[]] if unsatisfiable),
+    [sat_check], [assert_a] (entailment), [get_type], [eval_expr],
+    [simplify_val], [fresh_loc], [to_assertions] (path condition and types),
+    [copy], and [execute_action name state args], which runs a JS memory
+    action ([GetCell], [SetCell], [GetMetadata], [GetAllProps], ... of
+    [JSILSMemory] / [JSILCMemory]). Engine packages that need memory
+    internals (e.g. LazyJSON) should add a memory action to [JSILSMemory] and
+    call it through [execute_action]; its result is
+    [(state', return values) list] or errors. Fresh logical variables can be
+    created with [Gillian.Gil_syntax.LVar.alloc ()].
+
     {2 Example}
 
     {[
