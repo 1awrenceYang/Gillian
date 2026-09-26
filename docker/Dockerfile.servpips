@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1.7
+#
+# SERVPIPS engine image: gillian-js built from this fork (servpips branches).
+#
+# Build (from the repository root, BuildKit required):
+#
+#   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.servpips \
+#     --build-arg FORK_COMMIT=$(git rev-parse HEAD) \
+#     -t servpips-gillian:<sha12> .
+#
+# Layers:
+#   1. deps    : ocaml/opam + system packages + `opam install --deps-only` of
+#                the gillian and gillian-js packages. Only the *.opam files are
+#                copied, so this layer is rebuilt only when dependencies change.
+#   2. build   : sources + `dune build @install` for gillian/gillian-js, with
+#                `_build` kept in a BuildKit cache mount (incremental rebuilds),
+#                then a relocatable `dune install` into /opt/gillian.
+#   3. runtime : debian 13 slim + z3 4.13.3 + libgmp + libsqlite3, with
+#                /opt/gillian/{bin,share}. Runs as any uid (e.g. the host uid).
+#
+# Run (example):
+#
+#   docker run --rm --user $(id -u):$(id -g) --network none \
+#     -v <work>:<work> -w <work>/shard-t0 servpips-gillian:<sha12> \
+#     wpst ../main.js -l disabled --result-dir .gillian \
+#     --servpips --servpips-log events.jsonl
+#
+# The image label `servpips.fork.commit` (and the env var
+# SERVPIPS_FORK_COMMIT, reported in the `hello` event) record FORK_COMMIT.
+
+ARG OPAM_IMAGE=ocaml/opam:debian-13-ocaml-5.3
+ARG RUNTIME_IMAGE=debian:13-slim
+
+# ---------------------------------------------------------------------------
+FROM ${OPAM_IMAGE} AS deps
+# Parallelism of opam/dune inside the build (keep it modest on shared hosts).
+ARG JOBS=8
+RUN sudo apt-get update \
+    && sudo apt-get install -y --no-install-recommends \
+         libgmp-dev pkg-config libsqlite3-dev python3 z3 \
+    && sudo rm -rf /var/lib/apt/lists/*
+WORKDIR /home/opam/app/Gillian
+COPY --chown=opam:opam gillian.opam gillian-js.opam ./
+RUN opam update -y \
+    && opam install -y -j ${JOBS} ./gillian.opam ./gillian-js.opam --deps-only
+
+# ---------------------------------------------------------------------------
+FROM deps AS build
+ARG JOBS=8
+COPY --chown=opam:opam . .
+RUN sudo mkdir -p /opt/gillian && sudo chown opam:opam /opt/gillian
+RUN --mount=type=cache,id=servpips-gillian-build,target=/home/opam/app/Gillian/_build,uid=1000,gid=1000,sharing=locked \
+    opam exec -- dune build -j ${JOBS} --only-packages gillian,gillian-js @install \
+    && opam exec -- dune install --relocatable --prefix /opt/gillian gillian-js \
+    && rm -rf /opt/gillian/lib /opt/gillian/doc \
+    && test -x /opt/gillian/bin/gillian-js \
+    && test -f /opt/gillian/share/gillian-js/preamble.js \
+    && test -f /opt/gillian/share/gillian-js/runtime/Internals.jsil
+
+# ---------------------------------------------------------------------------
+FROM ${RUNTIME_IMAGE} AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends z3 libgmp10 libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && z3 --version | grep -q '4\.13\.3'
+COPY --from=build /opt/gillian /opt/gillian
+RUN chmod -R a+rX /opt/gillian
+ENV PATH=/opt/gillian/bin:$PATH \
+    GILLIAN_JS_RUNTIME_PATH=/opt/gillian/share/gillian-js
+ARG FORK_COMMIT=unknown
+ENV SERVPIPS_FORK_COMMIT=${FORK_COMMIT}
+LABEL servpips.fork.commit=${FORK_COMMIT}
+WORKDIR /tmp
+ENTRYPOINT ["/opt/gillian/bin/gillian-js"]
