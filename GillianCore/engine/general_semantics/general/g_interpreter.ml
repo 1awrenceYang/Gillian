@@ -2136,6 +2136,10 @@ struct
         let proc_name, annot_cmd = get_cmd prog cs i in
         if !Config.current_exec_mode <> Exec_mode.BiAbduction then
           L.normal (fun m -> m "WARNING: MAX BRANCHING STOP: %d.\n" b_counter);
+        (* SERVPIPS: make path truncation visible (the path is otherwise
+           silently dropped and the run still reports Success). *)
+        Printf.eprintf "SERVPIPS: MAX BRANCHING STOP (%d) in %s at cmd %d\n%!"
+          b_counter proc_name i;
         L.set_previous prev_cmd_report_id;
         L.(
           verbose (fun m ->

@@ -2214,6 +2214,19 @@ let rec translate_expr tr_ctx e :
       in
       ([ cmd1; cmd2 ], x_v, [])
   | JS_Parser.Syntax.Call (e_f, xes)
+    when e_f.JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var "__servpips_log"
+    ->
+      (* SERVPIPS experiment: external logging call, see Semantics/External.ml *)
+      let cmds_args, proc_args, errs_args =
+        translate_arg_list xes tr_ctx.tr_err_lab
+      in
+      let x_r = fresh_var () in
+      let cmd =
+        LECall
+          (x_r, Lit (String "ServpipsLog"), proc_args, Some tr_ctx.tr_err_lab)
+      in
+      (cmds_args @ [ (metadata, None, cmd) ], PVar x_r, errs_args @ [ x_r ])
+  | JS_Parser.Syntax.Call (e_f, xes)
     when Gillian.Utils.(Exec_mode.is_biabduction_exec !Config.current_exec_mode)
          &&
          match e_f.JS_Parser.Syntax.exp_stx with
@@ -5871,7 +5884,13 @@ and translate_statement tr_ctx e =
             ([ annotate_cmd cmd_ass_x1v None ], PVar x1_v, [])
       in
       (* x1_v := i__getValue (x1) with err *)
-      let x1_v, cmd_gv_x1, _ = make_get_value_call x1 tr_ctx.tr_err_lab in
+      (* SERVPIPS fix: use the error variables actually returned by
+         make_get_value_call; when x1 is already a value (e.g. the result of an
+         assignment) no getValue call is emitted and adding x1_v produced a
+         spurious PHI operand at the error label (off-by-one PHI selection). *)
+      let _x1_v, cmd_gv_x1, errs_x1_v =
+        make_get_value_call x1 tr_ctx.tr_err_lab
+      in
 
       (* x_ret_0 := empty  *)
       let x_ret_0, cmd_ass_ret_0 = make_empty_ass () in
@@ -5879,7 +5898,7 @@ and translate_statement tr_ctx e =
       let cmds1, errs1 =
         ( cmds1
           @ [ annotate_cmd cmd_gv_x1 None; annotate_cmd cmd_ass_ret_0 None ],
-          errs1 @ [ x1_v ] )
+          errs1 @ errs_x1_v )
       in
 
       let head, _, _, cont, end_loop = fresh_loop_vars () in
@@ -7297,8 +7316,10 @@ let compute_imports (for_verification : bool) : string list =
   if for_verification then js2jsil_logic_imports
   else if Exec_mode.is_biabduction_exec !Config.current_exec_mode then
     js2jsil_imports_bi
-  else if Exec_mode.is_symbolic_exec !Config.current_exec_mode then
-    js2jsil_imports_cosette
+  else if
+    Exec_mode.is_symbolic_exec !Config.current_exec_mode
+    && Option.is_none (Sys.getenv_opt "SERVPIPS_FULL_INIT")
+  then js2jsil_imports_cosette
   else js2jsil_imports
 
 let js2jsil ~filename e for_verification =
