@@ -1,8 +1,10 @@
-{"ev":"note","code":"uuidv4","msg":"app.js:10:23:31","site":null,"data":null}
-{"ev":"note","code":"putObject","msg":"app.js:10:2:40","site":null,"data":null}
-{"ev":"note","code":"putObject-again","msg":"null","site":null,"data":null}
-{"ev":"note","code":"get","msg":"null","site":null,"data":null}
-{"ev":"note","code":"get","msg":"null","site":null,"data":null}
-{"ev":"note","code":"get","msg":"null","site":null,"data":null}
-{"ev":"note","code":"get","msg":"app.js:15:2:10","site":null,"data":null}
-{"ev":"note","code":"Client","msg":"app.js:17:10:22","site":null,"data":null}
+{"ev": "note", "code": "uuidv4", "msg": "app.js:10:23:31", "site": null, "data": null}
+{"ev": "note", "code": "putObject", "msg": "app.js:10:2:40", "site": null, "data": null}
+{"ev": "note", "code": "putObject-again", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "app.js:15:2:10", "site": null, "data": null}
+{"ev": "note", "code": "Client", "msg": "app.js:17:10:22", "site": null, "data": null}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [], "types": []}
+{"ev": "stats", "leaves": 1, "ends": {"returned": 1, "threw": 0, "truncated": 0, "unknown": 0, "unsupported": 0, "error": 0}, "infeasible": 0, "vanished": 0, "max_branch": 0, "fatal": null, "solver": {"unknown_assumed_sat": 0, "entail_unknown": 0, "encode_failures": 0}}

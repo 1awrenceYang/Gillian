@@ -1,0 +1,23 @@
+(* SERVPIPS-ARGS: --smt-timeout 1 -a *)
+(* SERVPIPS WP1 core probe (E3), a hand-written GIL program (run with
+   wpst -a): a solver query answered unknown (1 ms timeout on a non-linear
+   query) keeps the path: the branch is treated as satisfiable and a
+   note{unknown-assumed-sat} is emitted. Written in GIL because under
+   --servpips the JS compiler sends user arithmetic through servpips_arith
+   (E14), which never leaves inexact non-linear terms in the path condition. *)
+proc main() {
+          x := fresh_svar();
+          assume_type (x, Num);
+          y := fresh_svar();
+          assume_type (y, Num);
+          z := fresh_svar();
+          assume_type (z, Num);
+          assume (1. < x);
+          assume (1. < y);
+          assume (1. < z);
+          goto [(((((x * x) * x) * y) + (((y * y) * y) * z)) + (((z * z) * z) * x)) == (3. + (((17. * x) * y) * z))] yes no;
+  yes:    ret := 1.;
+          goto done;
+  no:     ret := 0.;
+  done:   return
+};

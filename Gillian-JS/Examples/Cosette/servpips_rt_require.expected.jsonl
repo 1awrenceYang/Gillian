@@ -1,4 +1,6 @@
-{"ev":"decl","lvar":"#gen__0","name":"module.init","sort":"Str","kind":"env","parent":null,"key":null,"parent_lvar":null,"parent_aloc":null,"shape":null,"open":null,"site":null,"k":null}
-{"ev":"decl","lvar":"#gen__1","name":"module.value","sort":"Str","kind":"input","parent":null,"key":null,"parent_lvar":null,"parent_aloc":null,"shape":null,"open":null,"site":null,"k":null}
-{"ev":"note","code":"init","msg":"","site":null,"data":{"t":"val","e":{"pp":"\"cfg\"","ast":["Lit",["String","cfg"]]}}}
-{"ev":"note","code":"nonempty","msg":"","site":null,"data":{"t":"val","e":{"pp":"#gen__1","ast":["LVar","#gen__1"]}}}
+{"ev": "decl", "lvar": "#gen__0", "name": "module.init", "sort": "Str", "kind": "env", "parent": null, "key": null, "parent_lvar": null, "parent_aloc": null, "shape": null, "open": null, "site": null, "k": null}
+{"ev": "decl", "lvar": "#gen__1", "name": "module.value", "sort": "Str", "kind": "input", "parent": null, "key": null, "parent_lvar": null, "parent_aloc": null, "shape": null, "open": null, "site": null, "k": null}
+{"ev": "note", "code": "init", "msg": "", "site": null, "data": {"t": "val", "e": {"pp": "\"cfg\"", "ast": ["Lit", ["String", "cfg"]]}}}
+{"ev": "note", "code": "nonempty", "msg": "", "site": null, "data": {"t": "val", "e": {"pp": "#gen__1", "ast": ["LVar", "#gen__1"]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#gen__0 == \"cfg\")", "ast": ["BinOp", ["LVar", "#gen__0"], ["Equal"], ["Lit", ["String", "cfg"]]]}, {"pp": "(! (#gen__1 == \"\"))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#gen__1"], ["Equal"], ["Lit", ["String", ""]]]]}], "types": [[{"pp": "#gen__0", "ast": ["LVar", "#gen__0"]}, "Str"], [{"pp": "#gen__1", "ast": ["LVar", "#gen__1"]}, "Str"]]}
+{"ev": "stats", "leaves": 1, "ends": {"returned": 1, "threw": 0, "truncated": 0, "unknown": 0, "unsupported": 0, "error": 0}, "infeasible": 0, "vanished": 0, "max_branch": 0, "fatal": null, "solver": {"unknown_assumed_sat": 0, "entail_unknown": 0, "encode_failures": 0}}

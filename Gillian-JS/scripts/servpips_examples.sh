@@ -15,7 +15,9 @@
 #   -v        print the diff and output tail of failing examples
 #   PATTERN   only run examples whose file name contains one of the patterns
 #
-# Kinds of examples (servpips_<package>_<name>.js; packages core, mem, rt, s0):
+# Kinds of examples (servpips_<package>_<name>.js; packages core, mem, rt, s0;
+# hand-written GIL probes servpips_<package>_<name>.gil are wpst tests run
+# with -a):
 #   - wpst test: the file has <name>.expected.jsonl, or contains the directive
 #     "servpips-example: wpst". It is run as
 #       gillian-js wpst ../../src/<name>.js --servpips --servpips-log events.jsonl \
@@ -73,6 +75,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/servpips-examples.XXXXXX")
 chmod 777 "$WORK"
 mkdir -p "$WORK/src" "$WORK/run" "$WORK/res"
 cp "$EX_DIR"/servpips_*.js "$WORK/src/"
+cp "$EX_DIR"/servpips_*.gil "$WORK/src/" 2>/dev/null
 cp "$EX_DIR"/servpips_*.expected.jsonl "$WORK/src/" 2>/dev/null
 chmod -R a+rwX "$WORK"
 
@@ -83,7 +86,7 @@ directive() {
 }
 # header FILE NAME -> value of /* NAME: value */, or empty
 header() {
-  sed -n "s/.*$2: *\\(.*[^ ]\\) *\\*\\/.*/\\1/p" "$1" | head -1
+  sed -n "s/.*$2: *\\(.*[^ ]\\) *\\*[/)].*/\\1/p" "$1" | head -1
 }
 
 cat > "$WORK/events.py" <<'PY'
@@ -196,10 +199,14 @@ run_gillian() { # run_gillian NAME ARGS...
 }
 
 run_one() { # run_one NAME ; writes $WORK/res/NAME.{status,log}
-  local name=$1 src=$WORK/src/$1.js dir=$WORK/run/$1
+  local name=$1 ext=js dir=$WORK/run/$1
+  [ -f "$WORK/src/$1.gil" ] && ext=gil
+  local src=$WORK/src/$1.$ext
   mkdir -p "$dir"; chmod 777 "$dir"
   local extra rc exp_rc mode kinds defaults
   extra="$(header "$src" SERVPIPS-ARGS) $(directive "$src" args)"
+  # hand-written GIL probes (servpips_*.gil) run with -a
+  if [ "$ext" = gil ]; then case " $extra " in *" -a "*) ;; *) extra="$extra -a" ;; esac; fi
   kinds=$(header "$src" SERVPIPS-EVENTS)
   mode=wpst
   case "$name" in *_exec) mode=exec ;; esac
@@ -218,7 +225,7 @@ run_one() { # run_one NAME ; writes $WORK/res/NAME.{status,log}
   case " $extra " in *" --unroll "*) ;; *) defaults="$defaults --unroll 2000" ;; esac
   case " $extra " in *" --smt-timeout "*) ;; *) defaults="$defaults --smt-timeout 5000" ;; esac
   # shellcheck disable=SC2086
-  run_gillian "$name" wpst "../../src/$name.js" --servpips --servpips-log events.jsonl \
+  run_gillian "$name" wpst "../../src/$name.$ext" --servpips --servpips-log events.jsonl \
     -l disabled --result-dir .gillian $defaults $extra > "$dir/stdout" 2>&1
   rc=$?
   exp_rc=$(directive "$src" rc); exp_rc=${exp_rc:-0}
@@ -244,8 +251,9 @@ run_one() { # run_one NAME ; writes $WORK/res/NAME.{status,log}
 }
 
 TESTS=()
-for f in "$WORK"/src/servpips_*.js; do
-  name=$(basename "$f" .js)
+for f in "$WORK"/src/servpips_*.js "$WORK"/src/servpips_*.gil; do
+  [ -f "$f" ] || continue
+  name=$(basename "$f"); name=${name%.js}; name=${name%.gil}
   if [ ${#PATTERNS[@]} -gt 0 ]; then
     keep=0
     for p in "${PATTERNS[@]}"; do case "$name" in *"$p"*) keep=1 ;; esac; done
