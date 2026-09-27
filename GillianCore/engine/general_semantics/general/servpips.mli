@@ -88,7 +88,9 @@ val note :
     [SERVPIPS_FORK_COMMIT], set in the engine image; ["unknown"] otherwise). *)
 val fork_commit : unit -> string
 
-(** Extra [hello] field [builtins] (the SMT-LIB text of builtin definitions):
+(** Extra [hello] field [builtins] (the SMT-LIB text of builtin definitions;
+    [hello] adds ["servpips_arith": "E14"]: the JS compiler emits the
+    arithmetic extern [servpips_arith] in SERVPIPS mode):
     by default [Servpips_functions.hello_json], i.e.
     [{"str.in_re.numlit": "<regex text>"}]. *)
 val hello_builtins : (unit -> Yojson.Safe.t) ref

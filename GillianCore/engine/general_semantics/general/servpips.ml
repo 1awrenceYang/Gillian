@@ -124,6 +124,16 @@ let fork_commit () =
 let hello_builtins : (unit -> Yojson.Safe.t) ref =
   ref Smt.Servpips_functions.hello_json
 
+(* The JS compiler emits the arithmetic extern servpips_arith (E14) in
+   SERVPIPS mode: announced as builtins.servpips_arith (the converter then
+   translates the remaining FPlus/FMinus/FTimes/FDiv of path conditions and
+   values exactly, WP6a). *)
+let with_arith (j : Yojson.Safe.t) : Yojson.Safe.t =
+  match j with
+  | `Assoc l when not (List.mem_assoc "servpips_arith" l) ->
+      `Assoc (l @ [ ("servpips_arith", `String "E14") ])
+  | j -> j
+
 let hello ~unroll () =
   if !enabled_ref then
     let c = config () in
@@ -138,7 +148,7 @@ let hello ~unroll () =
            ("shard", c.shard_json);
            ("unroll", `Int unroll);
            ("smt_timeout_ms", `Int c.smt_timeout_ms);
-           ("builtins", !hello_builtins ());
+           ("builtins", with_arith (!hello_builtins ()));
          ])
 
 let emit_end ~status ~reason ?outcome ~pc ~types () =
