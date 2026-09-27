@@ -299,11 +299,11 @@ module Make (E : X.ENV) = struct
 
   (* ---- path condition ---- *)
 
-  let pc_types st =
-    try
-      Servpips.pc_and_types_of_asrt
-        (S.to_assertions ~to_keep:Containers.SS.empty st)
-    with _ -> ([], [])
+  (* The path condition and the type environment of the state, read directly
+     (State.servpips_pc, WP1) instead of through State.to_assertions, which
+     converts the whole heap (the full ES5 initial heap has tens of thousands
+     of objects) at every call / note event (integration round 1). *)
+  let pc_types st = try S.servpips_pc st with _ -> ([], [])
 
   (* [assume_all st fs]: copy of [st] with every formula of [fs] assumed, or
      [None] if unsatisfiable. *)
@@ -905,7 +905,29 @@ module Make (E : X.ENV) = struct
         let st = lazykeys_update st o k ~add:false in
         [ X.Return (st, undef) ]
 
-  let mark (st : st) (args : vt list) : outcome list =
+  (* The object locations [o] stands for, one per branch: [o] itself when it
+     is a location; otherwise (a LazyJSON value that is not materialised on
+     this path, e.g. a lazy error object marked as a model object) the
+     GetMetadata memory action materialises it, one branch per class
+     (integration round 1). *)
+  let object_branches what (st : st) (o : vt) : (st * vt) list =
+    if is_loc o then [ (st, o) ]
+    else
+      let res =
+        try S.execute_action "GetMetadata" st [ o ] with
+        | Servpips.Path_end _ as e -> raise e
+        | _ -> []
+      in
+      let locs =
+        List.map
+          (function
+            | Ok (st', l :: _) when is_loc l -> (st', l)
+            | _ -> fail_err "%s: not an object: %s" what (pp_v o))
+          res
+      in
+      if locs = [] then fail_err "%s: not an object: %s" what (pp_v o) else locs
+
+  let mark_loc (st : st) (args : vt list) : outcome list =
     match args with
     | o :: flag :: rest -> (
         if not (is_loc o) then fail_err "not an object: %s" (pp_v o);
@@ -926,6 +948,14 @@ module Make (E : X.ENV) = struct
         | Some (st, m) ->
             let st = set_cell st m (vstr ("@sp_" ^ flag)) value in
             [ X.Return (st, undef) ])
+    | _ -> fail_err "expected (object, flag, value)"
+
+  let mark (st : st) (args : vt list) : outcome list =
+    match args with
+    | o :: flag :: rest ->
+        List.concat_map
+          (fun (st, o) -> mark_loc st (o :: flag :: rest))
+          (object_branches "mark" st o)
     | _ -> fail_err "expected (object, flag, value)"
 
   let is_concrete (st : st) (args : vt list) : outcome list =
