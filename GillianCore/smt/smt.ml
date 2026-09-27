@@ -951,6 +951,9 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
         let>-- args = List.map (fun lit -> simple_wrap (encode_lit lit)) lits in
         let args = List.map (fun arg -> arg.expr) args in
         list args >- ListType
+    | Constant c when !servpips_mode && Literal.servpips_lower_constants lit <> None ->
+        (* SERVPIPS: deterministic constants are numbers *)
+        encode_lit (Literal.evaluate_constant c)
     | Constant _ -> raise (Exceptions.Unsupported "Z3 encoding: constants")
   with Failure msg -> exceptf "DEATH: encode_lit %a. %s" Literal.pp lit msg
 

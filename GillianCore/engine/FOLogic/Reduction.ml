@@ -1022,6 +1022,12 @@ and reduce_lexpr_loop
     (* -------------------------
               Base cases
        ------------------------- *)
+    (* SERVPIPS: deterministic GIL constants ($$max_value, $$epsilon, $$pi,
+       ...) are numbers (upstream they reached no symbolic component) *)
+    | Lit l when !Config.servpips_semantics -> (
+        match Literal.servpips_lower_constants l with
+        | Some l -> Lit l
+        | None -> le)
     | Lit _ | PVar _ | ALoc _ -> le
     (* -------------------------
                  LVar
