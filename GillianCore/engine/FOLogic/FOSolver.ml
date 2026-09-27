@@ -73,6 +73,9 @@ let check_satisfiability_with_model (fs : Expr.t list) (gamma : Type_env.t) :
       (* SERVPIPS: unknown is treated as satisfiable, without a model *)
       Servpips.note_unknown ~entailment:false;
       Some subst
+  | Some model when Smt.is_sat_model model ->
+      (* SERVPIPS: satisfiable; no model is requested from the solver *)
+      Some subst
   | Some model -> (
       try
         Smt.lift_model model gamma_tbl update smt_vars;

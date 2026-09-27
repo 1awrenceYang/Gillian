@@ -35,6 +35,14 @@ val unknown_model : Sexplib.Sexp.t
 
 val is_unknown_model : Sexplib.Sexp.t -> bool
 
+(** The pseudo-model returned for a [sat] answer in SERVPIPS mode: no model is
+    requested from the solver (the engine only uses sat / unsat, and Sexplib
+    cannot read every SMT-LIB string literal of a model). [lift_model] must
+    not be called on it. *)
+val sat_model : Sexplib.Sexp.t
+
+val is_sat_model : Sexplib.Sexp.t -> bool
+
 val exec_sat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> Sexplib.Sexp.t option
 val is_sat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> bool
 

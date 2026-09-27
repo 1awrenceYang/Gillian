@@ -46,6 +46,20 @@ let is_unknown_model = function
   | Sexplib.Sexp.Atom "servpips:unknown" -> true
   | _ -> false
 
+(* SERVPIPS: a satisfiable query does not ask the solver for a model. The
+   engine's decisions only use sat / unsat (models are only printed for failing
+   assertions), and simple_smt reads the solver's answers with Sexplib, whose
+   quoted atoms are OCaml-style, not SMT-LIB-style: a model string value made
+   of one backslash (which z3 prints unescaped between two double quotes)
+   leaves the reader waiting for the end of the atom while z3 waits for the
+   next command -- the engine hangs with both processes idle -- and a value
+   with a double quote (printed doubled, SMT-LIB style) is read as two atoms. *)
+let sat_model = Sexplib.Sexp.Atom "servpips:sat"
+
+let is_sat_model = function
+  | Sexplib.Sexp.Atom "servpips:sat" -> true
+  | _ -> false
+
 let pp_sexp = Sexplib.Sexp.pp_hum
 let ( <| ) constr e = app constr [ e ]
 let ( $$ ) constr l = app constr l
@@ -2066,6 +2080,7 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
           raise
             Gillian_result.Exc.(
               internal_error ~additional_data "SMT returned unknown")
+    | Sat when !servpips_mode -> Some sat_model
     | Sat -> Some (get_model !solver)
     | Unsat -> None
   in

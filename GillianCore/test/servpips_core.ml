@@ -645,6 +645,22 @@ let test_msgn_copysign () =
   chk Float.infinity 1.;
   chk Float.neg_infinity (-1.)
 
+let test_no_model () =
+  (* a satisfiable query whose z3 model holds the string "\\" (one backslash,
+     printed unescaped by z3) hung the engine: Sexplib waited for the end of
+     the quoted atom while z3 waited for the next command. In SERVPIPS mode no
+     model is requested. *)
+  Smt.servpips_enable ();
+  let s = Expr.Lit (String "\\") in
+  let q = Expr.Set.of_list [ eq (lv "#bs") s ] in
+  let g = Hashtbl.create 1 in
+  Hashtbl.replace g "#bs" Type.StringType;
+  (match Smt.check_sat q g with
+  | Some m -> Alcotest.(check bool) "sat without a model" true (Smt.is_sat_model m)
+  | None -> Alcotest.fail "unsat");
+  Alcotest.(check bool) "not the unknown pseudo-model" false
+    (Smt.is_unknown_model Smt.sat_model)
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -679,4 +695,5 @@ let tests : unit Alcotest.test_case list =
     ("typing does not commit inferred types", `Quick, test_typing_no_commit);
     ("E7 negate keeps NaN comparisons", `Quick, test_negate_nan);
     ("input never equals another location", `Quick, test_input_not_loc);
+    ("SERVPIPS: sat answers read no model (backslash string)", `Quick, test_no_model);
   ]
