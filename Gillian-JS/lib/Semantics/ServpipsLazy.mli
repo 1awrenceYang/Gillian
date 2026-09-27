@@ -222,6 +222,10 @@ type info = {
 (** Has any lazy value been registered? *)
 val active : unit -> bool
 
+(** Must [SetCell] / [DeleteCell] call {!before_set_cell}: a lazy value was
+    registered, or [@sp_lazykeys] was set on some (program) object. *)
+val write_hooks_active : unit -> bool
+
 val find : string -> info option
 
 (** The (lvar, class index) materialised at an abstract location. *)
@@ -276,7 +280,8 @@ val materialize_loc : mstate -> Expr.t -> branch list option
 val get_cell_miss : mstate -> string -> Expr.t -> ret option
 
 (** Bookkeeping before a [SetCell] (value [none] = delete): see "Writes"
-    and "Hidden members" above. *)
+    and "Hidden members" above; on a program object whose [@sp_lazykeys]
+    holds the key, the key leaves that set. *)
 val before_set_cell : mstate -> string -> Expr.t -> Expr.t -> unit
 
 (** [GetMetadata] of an unresolved registered lazy value that may be an

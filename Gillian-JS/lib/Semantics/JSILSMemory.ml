@@ -224,7 +224,7 @@ module M = struct
       (v : vt) : action_ret =
     with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
         let loc_name, _, new_pfs = fresh_loc ~loc pfs gamma in
-        if SL.active () then
+        if SL.write_hooks_active () then
           SL.before_set_cell (sp_ms heap pfs gamma) loc_name prop v;
         SHeap.set_fv_pair heap loc_name prop v;
         Ok [ (heap, [], new_pfs, []) ])
@@ -451,7 +451,7 @@ module M = struct
     with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
         let heap = SHeap.copy heap in
         let f (loc_name : string) : unit =
-          if SL.active () then
+          if SL.write_hooks_active () then
             SL.before_set_cell (sp_ms heap pfs gamma) loc_name prop (Lit Nono);
           Option.fold
             ~some:(fun ((fv_list, dom), mtdt) ->

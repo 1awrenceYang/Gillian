@@ -474,6 +474,12 @@ let aloc_owner : (string, string * int) Hashtbl.t = Hashtbl.create 256
 let len_vars : (string, string) Hashtbl.t = Hashtbl.create 64
 let elem_counter : (string, int) Hashtbl.t = Hashtbl.create 64
 let active () = Hashtbl.length infos > 0
+
+(** Has [@sp_lazykeys] been set on some object (SpMarkLazyKey / SpDefine,
+    possibly on a program object before any lazy value exists)? *)
+let lazykeys_marked = ref false
+
+let write_hooks_active () = active () || !lazykeys_marked
 let find (x : string) : info option = Hashtbl.find_opt infos x
 let owner_of_aloc (l : string) : (string * int) option = Hashtbl.find_opt aloc_owner l
 let is_lazy_aloc (l : string) : bool = Hashtbl.mem aloc_owner l
@@ -1173,7 +1179,16 @@ let hidden_write (ms : mstate) (al : string) (c : class_spec) (k : string)
 let before_set_cell (ms : mstate) (al : string) (prop : Expr.t) (value : Expr.t) :
     unit =
   match owner_of_aloc al with
-  | None -> ()
+  | None -> (
+      (* a program object with members defined by a resolver (e.g. a
+         program-object view of the models): a program write or deletion of
+         [k] ends "k exists iff its value is not undefined" (E11) *)
+      match meta_cell ms.heap al lazykeys_key with
+      | Some (ESet (_ :: _)) -> (
+          match reduce ms prop with
+          | Lit (String k) -> set_remove ms.heap al lazykeys_key k
+          | _ -> ())
+      | _ -> ())
   | Some (x, i) ->
       let k =
         match reduce ms prop with
@@ -1579,6 +1594,7 @@ let lazy_name (ms : mstate) (v : Expr.t) : string option =
 let mark_lazy_key (ms : mstate) ~(loc : string) ~(key : string) : unit =
   if not (SHeap.has_loc ms.heap loc) then
     engine_error ("SERVPIPS mark_lazy_key: unknown location " ^ loc);
+  lazykeys_marked := true;
   set_add ms.heap loc lazykeys_key key
 
 let define (ms : mstate) ~(loc : string) ~(key : string) (v : Expr.t) : unit =
