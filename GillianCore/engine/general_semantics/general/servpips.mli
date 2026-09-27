@@ -230,6 +230,9 @@ val encode_failure : msg:string -> 'a
 (** Record a fatal error for [stats.fatal] (first one wins). *)
 val set_fatal : string -> unit
 
+(** The recorded fatal error, if any. *)
+val fatal : unit -> string option
+
 (** Emit the final [stats] event (once):
     [{"ev":"stats","leaves":..,"ends":{..},"infeasible":..,"vanished":..,
       "prunes":..,"max_branch":..,"solver":{"queries":..,

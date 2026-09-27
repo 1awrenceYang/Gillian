@@ -367,6 +367,8 @@ let encode_failure ~msg =
          reason = truncate_reason ("smt-encoding: " ^ msg);
        })
 
+let fatal () = counters.fatal
+
 let set_fatal msg =
   match counters.fatal with
   | None -> counters.fatal <- Some (truncate_reason msg)

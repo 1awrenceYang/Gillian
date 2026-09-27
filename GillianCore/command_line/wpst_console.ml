@@ -102,8 +102,13 @@ module Make
       Servpips.emit_stats ();
       Printf.printf "Total time (Compilation + Symbolic testing): %fs\n"
         (Unix.gettimeofday () -. !start_time);
-      Fmt.pr "SERVPIPS: symbolic execution done@\n@?";
-      Ok ()
+      match Servpips.fatal () with
+      | None ->
+          Fmt.pr "SERVPIPS: symbolic execution done@\n@?";
+          Ok ()
+      | Some msg ->
+          Fmt.pr "SERVPIPS: fatal: %s@\n@?" msg;
+          Gillian_result.internal_error ("SERVPIPS fatal: " ^ msg)
 
     let run_main prog init_data : unit Gillian_result.t =
       if Servpips.enabled () then run_main_servpips prog init_data else
