@@ -785,6 +785,18 @@ module M = struct
               SL.define (sp_ms heap pfs gamma) ~loc:l ~key:k v;
               Ok [ (heap, [], [], []) ])
       | _ -> bad ()
+    else if action = SL.a_put_prepare then
+      match args with
+      | [ loc; k ] ->
+          if not (SL.active ()) then Ok [ (heap, [], [], []) ]
+          else
+            with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+                (match get_loc_name pfs gamma loc with
+                | Some l when SHeap.has_loc heap l ->
+                    SL.put_prepare (sp_ms heap pfs gamma) ~loc:l k
+                | _ -> ());
+                Ok [ (heap, [], [], []) ])
+      | _ -> bad ()
     else if action = SL.a_absent then
       match args with
       | [ loc; k ] ->

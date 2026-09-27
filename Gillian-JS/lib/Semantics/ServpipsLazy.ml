@@ -1313,6 +1313,69 @@ let absent (ms : mstate) ~(loc : string) ~(key : string) : unit =
   raw_set_cell ms.heap loc (str key) nono;
   set_remove ms.heap loc lazykeys_key key
 
+(** Does [k] certainly not exist on the object [l] (no cell, known domain,
+    literal field names)? *)
+let certainly_absent (heap : SHeap.t) (l : string) (k : string) : bool =
+  match SHeap.get heap l with
+  | Some ((fvl, Some (ESet dom)), _) ->
+      SFVL.get (str k) fvl = None
+      && List.for_all (function Expr.Lit (String _) -> true | _ -> false) dom
+      && (not (List.mem (str k) dom))
+      && SFVL.fold
+           (fun n _ ac -> ac && match n with Expr.Lit (String _) -> true | _ -> false)
+           fvl true
+  | _ -> false
+
+(** Would [[Put]](o, k, v) on an extensible object [o] without an own [k]
+    whose prototype is [proto] create the own data property [k] =
+    [{v, writable, enumerable, configurable}]? True when, along the
+    prototype chain, [k] is absent or first found as a writable data
+    property; objects with a resolver or lazily materialised objects on the
+    chain make the answer unknown (false). *)
+let rec put_creates_own (heap : SHeap.t) (proto : Expr.t option) (k : string)
+    (depth : int) : bool =
+  depth < 64
+  &&
+  match proto with
+  | Some (Lit Null) -> true
+  | Some (Lit (Loc l)) | Some (ALoc l) -> (
+      (not (is_lazy_aloc l))
+      && meta_cell heap l "@sp_resolver" = None
+      &&
+      match cell heap l (str k) with
+      | Some (Lit Nono) -> put_creates_own heap (meta_cell heap l "@proto") k (depth + 1)
+      | Some (EList [ Lit (String "d"); _; Lit (Bool true); _; _ ]) -> true
+      | Some _ -> false
+      | None ->
+          certainly_absent heap l k
+          && put_creates_own heap (meta_cell heap l "@proto") k (depth + 1))
+  | _ -> false
+
+(** Before [[Put]](loc, prop, v) (JSIL [put], extern
+    [servpips_put_prepare]): on a lazy JSON object (not a view, not an
+    array) with no cell for the concrete key [k] yet, when the [[Put]] is
+    certain to leave the own data property [k] = [{v, true, true, true}]
+    whether or not the input had a member [k] (the object is extensible and
+    the prototype chain has no setter and no read-only property [k]), store
+    a tombstone for [k] first, so that the write does not create (and
+    declare) the input member, nor fork for a name of [Object.prototype].
+    The two states differ only in the enumeration position of [k], and
+    enumerating a written lazy object is unsupported. Otherwise nothing. *)
+let put_prepare (ms : mstate) ~(loc : string) (prop : Expr.t) : unit =
+  match owner_of_aloc loc with
+  | None -> ()
+  | Some (x, i) -> (
+      let c = (Hashtbl.find infos x).classes.(i) in
+      if c.cls = Obj_cls && c.resolver = None then
+        match reduce ms prop with
+        | Lit (String k)
+          when cell ms.heap loc (str k) = None
+               && class_member c k <> None
+               && meta_cell ms.heap loc "@extensible" = Some true_
+               && put_creates_own ms.heap (meta_cell ms.heap loc "@proto") k 0 ->
+            SHeap.set_fv_pair ms.heap loc (str k) nono
+        | _ -> ())
+
 (* ------------------------------------------------------------------------ *)
 (* Memory action names (implemented by JSILSMemory)                         *)
 (* ------------------------------------------------------------------------ *)
@@ -1325,6 +1388,7 @@ let a_mark_lazy_key = "SpMarkLazyKey"
 let a_define = "SpDefine"
 let a_absent = "SpAbsent"
 let a_serialize = "SpSerialize"
+let a_put_prepare = "SpPutPrepare"
 
 (* Value trees produced by SpSerialize, handed to the caller by id. *)
 let serialized : (int, J.t) Hashtbl.t = Hashtbl.create 16
@@ -1692,7 +1756,29 @@ let x_shapes : ServpipsExterns.handler =
         [ ServpipsExterns.Return (state, E.Val.from_literal Undefined) ]);
   }
 
+(* servpips_put_prepare(l, prop): called by the JSIL [put] before [[Put]]
+   (see [put_prepare]); a no-op unless a lazy value exists (symbolic
+   execution under --servpips) *)
+let x_put_prepare : ServpipsExterns.handler =
+  {
+    run =
+      (fun (type st vt)
+           (module E : ServpipsExterns.ENV with type st = st and type vt = vt)
+           (state : st)
+           (args : vt list) ->
+        let undef = E.Val.from_literal Undefined in
+        match args with
+        | [ l; p ] when E.symbolic && active () ->
+            List.map
+              (function
+                | Ok (st, _) -> ServpipsExterns.Return (st, undef)
+                | Error _ -> engine_error "SERVPIPS memory action SpPutPrepare failed")
+              (E.State.execute_action a_put_prepare state [ l; p ])
+        | _ -> [ ServpipsExterns.Return (state, undef) ]);
+  }
+
 let () =
+  ServpipsExterns.register "servpips_put_prepare" x_put_prepare;
   ServpipsExterns.register "servpips_lazy" x_lazy;
   ServpipsExterns.register "servpips_member" x_member;
   ServpipsExterns.register "servpips_is_lazy" x_is_lazy;

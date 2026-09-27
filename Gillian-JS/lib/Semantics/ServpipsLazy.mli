@@ -108,12 +108,24 @@
       true}}] (keeping the domain invariant) and [SpMarkLazyKey]; not a
       program write (no dirtiness). For resolvers ([__sp.define]).
     - [SpAbsent(o, key)] -> [[]]: raw tombstone ([__sp.absent]).
+    - [SpPutPrepare(o, key)] -> [[]]: called (extern
+      [servpips_put_prepare]) by the JSIL [put] before [[Put]]: on a lazy
+      JSON object (not a view or array) without a cell for the concrete key
+      yet, if the [[Put]] certainly leaves the own data property
+      [{v, true, true, true}] whether or not the input had that member
+      (extensible object; along the prototype chain the key is absent or
+      first found as a writable data property; no resolver or lazy object
+      on the chain), a tombstone is stored first: writing a new key neither
+      creates nor declares the input member, and does not fork for names of
+      [Object.prototype]. Otherwise nothing.
 
     {1 Externs registered here}
 
     [servpips_lazy], [servpips_member], [servpips_is_lazy] (optional second
     argument ["pristine"] (default) or ["any"]), [servpips_shapes], and the
-    addition [servpips_lazy_name(v)] (name string or [undefined]). *)
+    additions [servpips_lazy_name(v)] (name string or [undefined]) and
+    [servpips_put_prepare(o, key)] (runtime hook of the JSIL [put]; a no-op
+    unless a lazy value was registered). *)
 
 open Gillian.Gil_syntax
 module PFS = Gillian.Symbolic.Pure_context
@@ -202,6 +214,10 @@ val mark_lazy_key : mstate -> loc:string -> key:string -> unit
 val define : mstate -> loc:string -> key:string -> Expr.t -> unit
 val absent : mstate -> loc:string -> key:string -> unit
 
+(** Before [[Put]] of the key [prop] on the object at [loc] (see
+    [SpPutPrepare]). *)
+val put_prepare : mstate -> loc:string -> Expr.t -> unit
+
 (** {2 Hooks used by JSILSMemory} *)
 
 type branch = SHeap.t * Expr.t list * (string * Type.t) list * string
@@ -264,6 +280,7 @@ val a_mark_lazy_key : string
 val a_define : string
 val a_absent : string
 val a_serialize : string
+val a_put_prepare : string
 val stash_serialized : Yojson.Safe.t -> int
 val take_serialized : int -> Yojson.Safe.t option
 
