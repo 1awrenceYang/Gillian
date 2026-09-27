@@ -46,10 +46,13 @@
       lazily and not written since: "[k] exists" iff its value is not
       [undefined]. Representation: a GIL list of string literals
       ([{{ "a", "b" }}]); a GIL set of strings is accepted too. Absent means
-      no such key. [[GetOwnProperty]] returns [undefined] for a key in
-      [@sp_lazykeys] whose value is [undefined] (so [in], [hasOwnProperty],
-      [propertyIsEnumerable], [getOwnPropertyDescriptor], [[CanPut]],
-      [[Delete]] follow).
+      no such key. The existence tests of the runtime (JSIL
+      [i__getOwnPropertyE] / [i__getPropertyE], used by HasProperty ([in],
+      Array methods), [hasOwnProperty], [propertyIsEnumerable] and
+      [getOwnPropertyDescriptor]) treat such a key as absent when its value
+      is [undefined] (forking when that is unknown); [[Get]], [[CanPut]],
+      [[DefineOwnProperty]] and [[Delete]] see the (phantom) cell as is,
+      which gives the same results, so reading a member never forks.
     - [@sp_kind]: ["blob"|"date"|"stream"|"set"] (value trees).
 
     {2 Externs}
@@ -108,9 +111,21 @@
       section 4.4 (NaN / +Infinity / -Infinity / [ToNumberOp s]) with their
       axioms; without [--servpips], [ToNumberOp s] (upstream behaviour).
     - [servpips_rejected(reason)] (JSIL [put], [deleteProperty],
-      [i__putValue] rejection): under [--servpips] ends the path
-      [unsupported(reason)]; otherwise returns [undefined] and the runtime
+      [i__putValue] rejection): ends the path [unsupported(reason)];
+      otherwise (inactive, see below) returns [undefined] and the runtime
       continues as upstream.
+    - Runtime hooks called by the JSIL runtime: [servpips_resolver(l)] (the
+      [@sp_resolver] of [l] or [empty]), [servpips_lazykey(l, p)] (is [p] in
+      the [@sp_lazykeys] of [l]; a GIL boolean, symbolic for a symbolic
+      [p]), [servpips_model_miss(l, p)] (after a miss on the whole prototype
+      chain), [servpips_enum_check(l)] (before enumerating [l]).
+
+    The runtime hooks, [servpips_rejected] and the symbolic branching of
+    [servpips_tonumber] are {e inactive} (upstream behaviour, heap untouched)
+    unless [--servpips] is on or the compiled program uses a SERVPIPS special
+    form ([JS2JSIL_Compiler.servpips_forms_used]); this keeps programs
+    without SERVPIPS forms identical to upstream and lets concrete-execution
+    model tests (which use the forms) see the hooks.
 
     Solver or encoding failures inside a handler end the path [unsupported]
     (never a silent drop). *)
