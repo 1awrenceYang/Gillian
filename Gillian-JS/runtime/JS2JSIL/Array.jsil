@@ -240,8 +240,9 @@ proc AP_toString (xsc, vthis) {
 
   norm:   PHI(f_o: arr_join, op_toString);
           m := metadata(f_o);
-          xsc := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (f_o);
+          xsc := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           ret_val := fun (xsc, arr_obj) with elab;
           goto [ret_val = empty] undef rlab;
 
@@ -403,8 +404,9 @@ proc AP_toLocaleString(xsc, vthis) {
 			goto [ret] call thrw;
 
 	call:	m := metadata(func);
-			xsc := [m, "@scope"];
-			fun := [m, "@call"];
+			sp_ct := "i__callTarget" (func);
+			xsc := l-nth (sp_ct, 1);
+			fun := l-nth (sp_ct, 0);
 			ret := fun (xsc, eothis) with elab;
 			goto [ret = empty] undef setR;
 	undef:	ret := undefined;
@@ -1036,8 +1038,9 @@ proc AP_every(xsc, vthis, cbf) {
 
   tt:     kval := "get" (arr_obj, pk) with elab;
           m := metadata(cbf);
-          scp := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (cbf);
+          scp := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           tr := fun (scp, t, kval, k, arr_obj) with elab;
           tr_bool := "i__toBoolean" (tr) with elab;
           goto [tr_bool] ff retf;
@@ -1084,8 +1087,9 @@ proc AP_some(xsc, vthis, callbackfn) {
 
   tt:     kval := "get" (arr_obj, pk) with elab;
           m := metadata(callbackfn);
-          scp := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (callbackfn);
+          scp := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           tr := fun (scp, t, kval, k, arr_obj) with elab;
           tr_bool := "i__toBoolean" (tr) with elab;
           goto [tr_bool] done ff;
@@ -1134,8 +1138,9 @@ proc AP_forEach(xsc, vthis, callbackfn) {
 
   tt:     kval := "get" (arr_obj, pk) with elab;
           m := metadata(callbackfn);
-          scp := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (callbackfn);
+          scp := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           ret_val := fun (scp, t, kval, k, arr_obj) with elab;
 
   ff:     next_k := k + 1;
@@ -1180,8 +1185,9 @@ proc AP_map(xsc, vthis, callbackfn) {
 
   tt:     kval := "get" (arr_obj, pk) with elab;
           m := metadata(callbackfn);
-          scp := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (callbackfn);
+          scp := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           mapv := fun (scp, t, kval, k, arr_obj) with elab;
           ret_def := "a__defineOwnProperty" (new_arr, pk, {{ "d", mapv, true, true, true }}, false) with elab;
 
@@ -1230,8 +1236,9 @@ proc AP_filter(xsc, vthis, callbackfn) {
 
   tt:     kval := "get" (arr_obj, pk) with elab;
           m := metadata(callbackfn);
-          scp := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (callbackfn);
+          scp := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           maybe_fret := fun (scp, t, kval, k, arr_obj) with elab;
           goto [maybe_fret = empty] set_fr phi_fr;
   set_fr: fr_undef := undefined;
@@ -1310,8 +1317,9 @@ proc AP_reduce(xsc, vthis, callbackfn) {
 
   t:      kval := "get" (arr_obj, pk) with elab;
           m := metadata(callbackfn);
-          scp := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (callbackfn);
+          scp := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           acc := fun (scp, undefined, acc, kval, k, arr_obj) with elab;
 
   f:      k := k + 1;
@@ -1379,8 +1387,9 @@ proc AP_reduceRight(xsc, vthis, callbackfn) {
 
   t:      kval := "get" (arr_obj, pk) with elab;
           m := metadata(callbackfn);
-          scp := [m, "@scope"];
-          fun := [m, "@call"];
+          sp_ct := "i__callTarget" (callbackfn);
+          scp := l-nth (sp_ct, 1);
+          fun := l-nth (sp_ct, 0);
           acc := fun (scp, undefined, acc, kval, k, arr_obj) with elab;
 
   f:      k := k - 1;
@@ -1558,8 +1567,9 @@ proc a__sortCompare(j, k, compfn, vthis) {
 	lif:	ret := "i__isCallable" (compfn);
 			goto [ret] call thrw;
 	call:	m := metadata(compfn);
-			scp := [m, "@scope"];
-			fun := [m, "@call"];
+			sp_ct := "i__callTarget" (compfn);
+			scp := l-nth (sp_ct, 1);
+			fun := l-nth (sp_ct, 0);
 			ret := fun (scp, undefined, x, y) with elab;
 			goto rlab;
 

@@ -2607,6 +2607,24 @@ let rec translate_expr tr_ctx e :
       let x_rbind = fresh_var () in
       let cmd_bind = LApply (x_rbind, PVar x_params, Some tr_ctx.tr_err_lab) in
 
+      (* SERVPIPS: a bound function is called with i__callFunction
+         (Internals.jsil), the ES5 [[Call]] of bound functions for any
+         nesting depth (the target of a bound function may be bound itself
+         and then has no @scope) *)
+      let sp_bind_cmds =
+        let x_sp_args = fresh_var () in
+        [
+          (Some bind, LBasic (Assignment (x_sp_args, EList x_args_gv)));
+          ( None,
+            LCall
+              ( x_rbind,
+                Lit (String "i__callFunction"),
+                [ PVar x_f_val; Lit Undefined; PVar x_sp_args ],
+                Some tr_ctx.tr_err_lab,
+                None ) );
+        ]
+      in
+
       (* SYNC *)
       let join = fresh_label () in
       let cmd_sync = LGoto join in
@@ -2733,6 +2751,12 @@ let rec translate_expr tr_ctx e :
                        (*        goto [x_bt = empty] call bind                                           *)
 
                        (* BIND *)
+                     ]
+                  @ (if !Gillian.Utils.Config.servpips_semantics then
+                       annotate_cmds sp_bind_cmds
+                     else
+                       annotate_cmds
+                         [
                        (Some bind, cmd_get_bt);
                        (*        x_bt := [xfvm, "@boundThis"];                                          *)
                        (None, cmd_get_ba);
@@ -2749,6 +2773,9 @@ let rec translate_expr tr_ctx e :
                        (*        SOMETHING ABOUT PARAMETERS                                                *)
                        (None, cmd_bind);
                        (*        MAGICAL FLATTENING CALL                                                   *)
+                         ])
+                  @ annotate_cmds
+                      [
                        (None, cmd_sync)
                        (*        goto join                                                                 *);
                      ])

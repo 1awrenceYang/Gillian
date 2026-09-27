@@ -155,6 +155,13 @@
       [i__putValue] rejection): ends the path [unsupported(reason)];
       otherwise (inactive, see below) returns [undefined] and the runtime
       continues as upstream.
+    - [servpips_enabled()] (JSIL runtime): [true] iff the SERVPIPS semantics
+      is on ([--servpips], wpst or exec). [i__callTarget] (Internals.jsil)
+      uses it to call bound functions from the runtime (Array higher-order
+      functions, sort comparators, [Function.prototype.call/apply],
+      getters/setters, DefaultValue, the resolver hook) with the ES5
+      [[Call]] of bound functions ([i__boundCall] / [i__callFunction]);
+      without [--servpips] such calls fail as upstream (no [@scope]).
     - Runtime hooks called by the JSIL runtime: [servpips_resolver(l)] (the
       [@sp_resolver] of [l] or [empty]), [servpips_lazykey(l, p)] (is [p] in
       the [@sp_lazykeys] of [l]; a GIL boolean, symbolic for a symbolic

@@ -1828,6 +1828,22 @@ let conv_h : X.handler =
               M.conv st args);
   }
 
+(* servpips_enabled(): is the SERVPIPS semantics on (--servpips, wpst or
+   exec)? Used by the JSIL runtime to gate SERVPIPS-only behaviour that
+   needs no other extern (calls of bound functions, i__callTarget). *)
+let enabled_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (_ : vt list) ->
+        let on =
+          Servpips.enabled () || !Gillian.Utils.Config.servpips_semantics
+        in
+        [ X.Return (st, E.Val.from_literal (Literal.Bool on)) ]);
+  }
+
 let initialised = ref false
 
 let init () =
@@ -1849,6 +1865,7 @@ let init () =
         ("servpips_tonumber", tonumber_h);
         ("servpips_rejected", rejected_h);
         ("servpips_conv", conv_h);
+        ("servpips_enabled", enabled_h);
         ("servpips_resolver", resolver_h);
         ("servpips_lazykey", lazykey_h);
         ("servpips_model_miss", model_miss_h);
