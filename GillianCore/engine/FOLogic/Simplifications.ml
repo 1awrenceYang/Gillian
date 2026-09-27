@@ -134,17 +134,29 @@ let servpips_hit
     PFS.clear rpfs;
     PFS.extend rpfs Expr.true_);
   (if memo_ok then
-     let glist = Type_env.to_list gamma in
+     let glist =
+       match cached.servpips_post with
+       | None -> Type_env.to_list gamma
+       | Some (pp, pg, gl) ->
+           if Type_env.generation gamma = pg then (
+             (* the environment already carries e's stamp (its reset was a
+                no-op): its bindings are gl, in gl's order *)
+             PFS.servpips_set_generation lpfs pp;
+             gl)
+           else
+             let glist = Type_env.to_list gamma in
+             if List.equal (fun a b -> a == b || a = b) gl glist then (
+               PFS.servpips_set_generation lpfs pp;
+               Type_env.servpips_set_generation gamma pg);
+             glist
+     in
      (match cached.servpips_post with
      | None ->
          let pp = PFS.fresh_stamp () and pg = Type_env.fresh_stamp () in
          cached.servpips_post <- Some (pp, pg, glist);
          PFS.servpips_set_generation lpfs pp;
          Type_env.servpips_set_generation gamma pg
-     | Some (pp, pg, gl) ->
-         if List.equal (fun a b -> a == b || a = b) gl glist then (
-           PFS.servpips_set_generation lpfs pp;
-           Type_env.servpips_set_generation gamma pg));
+     | Some _ -> ());
      if Hashtbl.length servpips_stamp_memo > 1_000_000 then
        Hashtbl.reset servpips_stamp_memo;
      Hashtbl.replace servpips_stamp_memo pre
