@@ -97,7 +97,8 @@ val hello_builtins : (unit -> Yojson.Safe.t) ref
 
 (** Emit the [hello] event:
     [{"ev":"hello","v":2,"fork":..,"z3":..,"shard":..,"unroll":..,
-      "smt_timeout_ms":..,"builtins":..,"typing":"asserted"}].
+      "smt_timeout_ms":..,"builtins":..,"typing":"asserted",
+      "facts":{"str.len.max":536870888,"js.num2str.len":[1,25]}}].
 
     [typing] is a capability: ["asserted"] means that the typing
     environment reported in [types] (of [end], [call], [prune], [decl]) only
@@ -107,7 +108,14 @@ val hello_builtins : (unit -> Yojson.Safe.t) ref
     typing mode since round 2: [Typing] does not commit inferred types, and
     reverse type inference does not look under disjunctions, implications,
     negations or [ite.*]). A converter may therefore state every reported
-    type as a fact. Absent in engines before round 3. *)
+    type as a fact. Absent in engines before round 3.
+
+    [facts] lists the facts every SMT query of the engine assumes about its
+    terms (asserted at the top level of the query): every string length is
+    at most [str.len.max] (V8's String::kMaxLength, 2^29 - 24), and the
+    length of Number::toString of a finite number (the js.num2str
+    function) is within [js.num2str.len]. A converter certifying prune
+    events should assume them too. Absent before round 3. *)
 val hello : unroll:int -> unit -> unit
 
 (** Emit an [end] event:

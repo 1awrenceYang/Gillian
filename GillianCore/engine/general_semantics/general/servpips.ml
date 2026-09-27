@@ -153,6 +153,15 @@ let hello ~unroll () =
               asserted -- implied by the path condition and the declared
               types -- never a type inferred while evaluating a term *)
            ("typing", `String "asserted");
+           (* facts every query of the engine assumes about its terms *)
+           ( "facts",
+             `Assoc
+               [
+                 ("str.len.max", `Int Smt.servpips_max_string_length);
+                 ( "js.num2str.len",
+                   let lo, hi = Smt.servpips_num2str_length in
+                   `List [ `Int lo; `Int hi ] );
+               ] );
          ])
 
 let emit_end ~status ~reason ?outcome ~pc ~types () =

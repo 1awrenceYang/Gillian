@@ -1041,10 +1041,13 @@ module Servpips_facts = struct
   let str_len_bound (len : sexp) =
     add (num_leq len (int_k max_string_length))
 
+  let num2str_min = 1
+  let num2str_max = 25
+
   let num2str_length (t : sexp) =
     let len = app_ "str.len" [ t ] in
-    add (num_leq (int_k 1) len);
-    add (num_leq len (int_k 25))
+    add (num_leq (int_k num2str_min) len);
+    add (num_leq len (int_k num2str_max))
 
   (* run [f] with [vars] bound (quantified variables, raw and as SMT atoms) *)
   let with_bound (vars : string list) f =
@@ -1085,6 +1088,11 @@ module Servpips_facts = struct
         let r = f () in
         (r, List.rev !l))
 end
+
+let servpips_max_string_length = Servpips_facts.max_string_length
+
+let servpips_num2str_length =
+  (Servpips_facts.num2str_min, Servpips_facts.num2str_max)
 
 (* SERVPIPS encodings (E5, E6): builtin functions and numeric operators *)
 (* ------------------------------------------------------------------ *)
