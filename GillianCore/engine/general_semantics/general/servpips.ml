@@ -45,6 +45,17 @@ let enable (c : config) =
   Smt.servpips_enable ();
   !start_sampler_ref ()
 
+(* [gillian-js compile --servpips]: compile exactly as [wpst --servpips]
+   would (same preamble, same SERVPIPS compilation), without an event log. *)
+let enable_compile ~runtime_dir =
+  (match !chan with
+  | Some oc -> close_out_noerr oc
+  | None -> ());
+  chan := None;
+  config_ref := Some { (default_config ()) with runtime_dir };
+  enabled_ref := true;
+  Config.servpips_semantics := true
+
 (* Non-finite floats are not JSON: encode them as {"nonfinite": ...}. *)
 let rec encode_nonfinite (j : Yojson.Safe.t) : Yojson.Safe.t =
   match j with

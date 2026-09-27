@@ -45,6 +45,12 @@ val config : unit -> config
     file (truncating it). Called by the [wpst] command line. *)
 val enable : config -> unit
 
+(** Turn SERVPIPS mode on for compilation only ([gillian-js compile
+    --servpips [--servpips-runtime DIR]]): the program is compiled exactly as
+    [wpst --servpips [--servpips-runtime DIR]] compiles it (same preamble,
+    same SERVPIPS forms), and no event log is opened ({!emit} does nothing). *)
+val enable_compile : runtime_dir:string option -> unit
+
 (** {2 Output} *)
 
 (** Write one JSON object as one line of the log and flush. No-op unless
