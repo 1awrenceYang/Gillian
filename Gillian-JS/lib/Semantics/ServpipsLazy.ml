@@ -665,10 +665,12 @@ let mark_dirty (heap : SHeap.t) (x : string) : unit =
 (* Children                                                                 *)
 (* ------------------------------------------------------------------------ *)
 
-(** Member shape contributed by class [c] for key [k] (with optionality). *)
-let class_member (c : class_spec) (k : string) : (J.t * bool) option =
-  if c.resolver <> None then None
-  else if String.length k > 0 && k.[0] = '@' then None
+(** Member shape of key [k] in the member structure of class [c] (with
+    optionality), whether or not the class has a resolver: for a view (a
+    class with a resolver) this is the structure of the underlying input
+    value, which its resolver reads through prefetched members. *)
+let class_struct_member (c : class_spec) (k : string) : (J.t * bool) option =
+  if String.length k > 0 && k.[0] = '@' then None
   else
     match c.cls with
     | Obj_cls -> obj_member_rule c.members k
@@ -682,6 +684,11 @@ let class_member (c : class_spec) (k : string) : (J.t * bool) option =
               else None
           | Sym -> Some (items, false))
 
+(** Member created by LazyJSON itself for key [k] of an object of class [c]
+    (GetCell miss): none for views, whose members come from their resolver. *)
+let class_member (c : class_spec) (k : string) : (J.t * bool) option =
+  if c.resolver <> None then None else class_struct_member c k
+
 let with_optional (s : J.t) (opt : bool) : J.t =
   if not opt then s
   else
@@ -692,7 +699,7 @@ let with_optional (s : J.t) (opt : bool) : J.t =
 let contributions (info : info) (k : string) : (int * J.t) list =
   List.filter_map
     (fun (i, c) ->
-      Option.map (fun (s, o) -> (i, with_optional s o)) (class_member c k))
+      Option.map (fun (s, o) -> (i, with_optional s o)) (class_struct_member c k))
     (List.mapi (fun i c -> (i, c)) (Array.to_list info.classes))
 
 (** The child of [info] at the concrete key [k] (global memo, one decl per
@@ -1077,14 +1084,136 @@ let before_set_cell (ms : mstate) (al : string) (prop : Expr.t) (value : Expr.t)
 (* Enumeration (GetAllProps hook)                                           *)
 (* ------------------------------------------------------------------------ *)
 
+(** Largest number of non-index members of an input object whose
+    enumeration order is explored (by forking over every order): the JSON
+    text order of an input object is not known. *)
+let max_enum_order_keys = 3
+
+let enumerated_key = "@sp_enumerated"
+
+(** Largest length explored (one branch per feasible length 0..n) when an
+    input array of symbolic length is enumerated. *)
+let max_enum_lengths = 10
+
+let rec permutations = function
+  | [] -> [ [] ]
+  | l ->
+      List.concat_map
+        (fun x -> List.map (fun p -> x :: p) (permutations (List.filter (( <> ) x) l)))
+        l
+
+(** Enumeration of a materialised lazy JSON object of a closed struct
+    (class without resolver, [closed] shape): exact. Every member of the
+    struct gets its cell (the member is created if needed); a member whose
+    existence is undetermined forks on "value = undefined" (absent: its
+    cell becomes a tombstone); then, as the JSON text order of the input is
+    unknown, one branch per order of the present non-index members (index
+    members come first in ascending order, E15), which is recorded as the
+    creation order of the object and marked [@sp_enumerated] so that later
+    enumerations on the path see the same order (and program writes are
+    then placed after it). More than [max_enum_order_keys] non-index
+    members that may be present, or a program write before the first
+    enumeration: [unsupported]. *)
+let closed_struct_enumeration (ms : mstate) (info : info) (i : int) (loc : string)
+    : (SHeap.t * Expr.t list * Expr.t list * (string * Type.t) list) list =
+  let c = info.classes.(i) in
+  let names heap =
+    match SHeap.ordered_fields heap loc with
+    | Ok names -> names
+    | Error _ -> unsupported "enumeration of an object with a symbolic key"
+  in
+  if meta_cell ms.heap loc enumerated_key <> None then [ (ms.heap, names ms.heap, [], []) ]
+  else (
+    if not (is_pristine_obj ms.heap loc) then
+      unsupported "enumeration of a written input object";
+    let props =
+      match field "props" c.members with
+      | Some (`Assoc l) -> List.filter (fun k -> class_member c k <> None) (List.map fst l)
+      | _ -> []
+    in
+    (* a branch: heap, facts, types; the first one works on ms.heap *)
+    let exists_step branches k =
+      List.concat_map
+        (fun (heap, facts, types) ->
+          let heap, facts, types, v =
+            match cell heap loc (str k) with
+            | Some (Lit Nono) -> (heap, facts, types, None)
+            | Some (EList [ Lit (String "d"); v; _; _; _ ])
+              when List.mem k (string_set heap loc lazykeys_key) ->
+                (heap, facts, types, Some v)
+            | Some _ -> (heap, facts, types, Some (Expr.Lit (Bool true)))
+            | None ->
+                let child = get_child ~parent_aloc:loc info k in
+                let ms' = { ms with heap; gamma = gamma_with ms types } in
+                let f, t, _ = child_facts ms' info i k child in
+                store_member heap loc k child;
+                (heap, facts @ f, types @ t, Some (Expr.LVar child.lvar))
+          in
+          match v with
+          | None -> [ (heap, facts, types) ]
+          | Some v ->
+              let gamma = gamma_with ms types in
+              let is_undef = eq v undef in
+              let can_undef = sat ms ~gamma (is_undef :: facts) in
+              let can_def = sat ms ~gamma (not_ is_undef :: facts) in
+              (* never drop the configuration (see member_access) *)
+              let can_def = can_def || not can_undef in
+              let absent h =
+                SHeap.set_fv_pair h loc (str k) nono;
+                set_remove h loc lazykeys_key k
+              in
+              if can_def && can_undef then (
+                let h' = SHeap.copy heap in
+                absent h';
+                [ (heap, facts @ [ not_ is_undef ], types); (h', facts @ [ is_undef ], types) ])
+              else if can_def then [ (heap, facts, types) ]
+              else (
+                absent heap;
+                [ (heap, facts, types) ]))
+        branches
+    in
+    let branches = List.fold_left exists_step [ (ms.heap, [], []) ] props in
+    let named heap =
+      List.filter
+        (fun k ->
+          (not (SHeap.is_array_index k))
+          &&
+          match cell heap loc (str k) with
+          | Some (Lit Nono) | None -> false
+          | Some _ -> true)
+        props
+    in
+    if List.exists (fun (h, _, _) -> List.length (named h) > max_enum_order_keys) branches
+    then
+      unsupported
+        (Printf.sprintf
+           "enumeration of input object %s: more than %d members, order unknown"
+           info.name max_enum_order_keys);
+    List.concat_map
+      (fun (heap, facts, types) ->
+        let perms = permutations (named heap) in
+        let n = List.length perms in
+        List.mapi
+          (fun j perm ->
+            let h = if j < n - 1 then SHeap.copy heap else heap in
+            SHeap.set_creation_order h loc (List.map str perm);
+            set_meta_cell h loc enumerated_key true_;
+            (h, names h, facts, types))
+          perms)
+      branches)
+
 let get_all_props (ms : mstate) (loc : string) :
-    (Expr.t list * Expr.t list * (string * Type.t) list) option =
+    (SHeap.t * Expr.t list * Expr.t list * (string * Type.t) list) list option =
   match owner_of_aloc loc with
   | None ->
       (match meta_cell ms.heap loc "@sp_open" with
       | Some (Lit (Bool false)) | None -> ()
       | Some _ -> unsupported "enumeration of an open object");
       None
+  | Some (x, i) when
+      (let c = (Hashtbl.find infos x).classes.(i) in
+       c.cls = Obj_cls && c.resolver = None && is_closed c.members) ->
+      Some (closed_struct_enumeration ms (Hashtbl.find infos x) i loc)
   | Some (x, i) -> (
       let info = Hashtbl.find infos x in
       let c = info.classes.(i) in
@@ -1092,29 +1221,56 @@ let get_all_props (ms : mstate) (loc : string) :
         unsupported "enumeration of an open object";
       if meta_cell ms.heap loc symcells_key <> None then
         unsupported "enumeration of an input array after a symbolic-index read";
-      let n =
+      (* the length on this path: concrete, or one branch per feasible value
+         when there are at most max_enum_lengths + 1 of them (a contract
+         bound such as maxLen), each adding len = n *)
+      let lengths =
         match array_len_kind c.members with
-        | Fixed n -> n
+        | Fixed n -> [ (ms.heap, n, []) ]
         | Sym -> (
-            match concrete_of ms (Expr.LVar (len_var info c)) with
+            let l = Expr.LVar (len_var info c) in
+            match concrete_of ms l with
             | Some (Lit (Num f)) when Float.is_integer f && f >= 0. && f < 1e7 ->
-                int_of_float f
-            | _ -> unsupported "enumeration of an input array of symbolic length")
+                [ (ms.heap, int_of_float f, []) ]
+            | _ ->
+                let num n = Expr.Lit (Num (float_of_int n)) in
+                if sat ms [ Expr.BinOp (num max_enum_lengths, FLessThan, l) ] then
+                  unsupported
+                    (Printf.sprintf
+                       "enumeration of an input array of symbolic length (more \
+                        than %d possible lengths)"
+                       (max_enum_lengths + 1));
+                let feasible =
+                  List.filter
+                    (fun n -> sat ms [ eq l (num n) ])
+                    (List.init (max_enum_lengths + 1) Fun.id)
+                in
+                (* never drop the configuration (see member_access) *)
+                let feasible = if feasible = [] then [ 0 ] else feasible in
+                let k = List.length feasible in
+                List.mapi
+                  (fun j n ->
+                    ((if j < k - 1 then SHeap.copy ms.heap else ms.heap), n, [ eq l (num n) ]))
+                  feasible)
       in
-      let facts = ref [] and types = ref [] in
-      for idx = 0 to n - 1 do
-        let k = string_of_int idx in
-        if cell ms.heap loc (str k) = None then (
-          let child = get_child ~parent_aloc:loc info k in
-          let ms' = { ms with gamma = gamma_with ms !types } in
-          let f, t, _ = child_facts ms' info i k child in
-          facts := !facts @ f;
-          types := !types @ t;
-          store_member ms.heap loc k child)
-      done;
-      match SHeap.ordered_fields ms.heap loc with
-      | Ok names -> Some (names, !facts, !types)
-      | Error _ -> unsupported "enumeration of an object with a symbolic key")
+      Some
+        (List.map
+           (fun (heap, n, lfacts) ->
+             let facts = ref lfacts and types = ref [] in
+             for idx = 0 to n - 1 do
+               let k = string_of_int idx in
+               if cell heap loc (str k) = None then (
+                 let child = get_child ~parent_aloc:loc info k in
+                 let ms' = { ms with heap; gamma = gamma_with ms !types } in
+                 let f, t, _ = child_facts ms' info i k child in
+                 facts := !facts @ f;
+                 types := !types @ t;
+                 store_member heap loc k child)
+             done;
+             match SHeap.ordered_fields heap loc with
+             | Ok names -> (heap, names, !facts, !types)
+             | Error _ -> unsupported "enumeration of an object with a symbolic key")
+           lengths))
 
 (* ------------------------------------------------------------------------ *)
 (* Registration, prefetched members, queries                               *)
@@ -1256,12 +1412,13 @@ let member (ms : mstate) (xv : Expr.t) (kv : Expr.t) :
   let admitted =
     match mat with
     | Some (al, i) ->
+        (* for a view (class with a resolver) this is the member of the
+           underlying input value, read by the resolver *)
         let c = info.classes.(i) in
-        if c.resolver <> None then unsupported "prefetched member of a lazy view";
         if List.mem k (string_set ms.heap al written_key)
            || List.mem k (string_set ms.heap al deleted_key)
         then unsupported "prefetched member of a written key";
-        if class_member c k = None then None else Some (Some i)
+        if class_struct_member c k = None then None else Some (Some i)
     | None -> if contributions info k = [] then None else Some None
   in
   match admitted with
@@ -1290,12 +1447,83 @@ let mark_lazy_key (ms : mstate) ~(loc : string) ~(key : string) : unit =
   set_add ms.heap loc lazykeys_key key
 
 let define (ms : mstate) ~(loc : string) ~(key : string) (v : Expr.t) : unit =
-  raw_set_cell ms.heap loc (str key) (data_desc v);
+  let desc =
+    (* the [length] of an array is {writable, not enumerable, not
+       configurable} (e.g. a view of class "Array" defining its length) *)
+    match (key, meta_cell ms.heap loc "@class") with
+    | "length", Some (Lit (String "Array")) ->
+        Expr.EList [ str "d"; v; true_; Lit (Bool false); Lit (Bool false) ]
+    | _ -> data_desc v
+  in
+  raw_set_cell ms.heap loc (str key) desc;
   mark_lazy_key ms ~loc ~key
 
 let absent (ms : mstate) ~(loc : string) ~(key : string) : unit =
   raw_set_cell ms.heap loc (str key) nono;
   set_remove ms.heap loc lazykeys_key key
+
+(** Does [k] certainly not exist on the object [l] (no cell, known domain,
+    literal field names)? *)
+let certainly_absent (heap : SHeap.t) (l : string) (k : string) : bool =
+  match SHeap.get heap l with
+  | Some ((fvl, Some (ESet dom)), _) ->
+      SFVL.get (str k) fvl = None
+      && List.for_all (function Expr.Lit (String _) -> true | _ -> false) dom
+      && (not (List.mem (str k) dom))
+      && SFVL.fold
+           (fun n _ ac -> ac && match n with Expr.Lit (String _) -> true | _ -> false)
+           fvl true
+  | _ -> false
+
+(** Would [[Put]](o, k, v) on an extensible object [o] without an own [k]
+    whose prototype is [proto] create the own data property [k] =
+    [{v, writable, enumerable, configurable}]? True when, along the
+    prototype chain, [k] is absent or first found as a writable data
+    property; objects with a resolver or lazily materialised objects on the
+    chain make the answer unknown (false). *)
+let rec put_creates_own (heap : SHeap.t) (proto : Expr.t option) (k : string)
+    (depth : int) : bool =
+  depth < 64
+  &&
+  match proto with
+  | Some (Lit Null) -> true
+  | Some (Lit (Loc l)) | Some (ALoc l) -> (
+      (not (is_lazy_aloc l))
+      && meta_cell heap l "@sp_resolver" = None
+      &&
+      match cell heap l (str k) with
+      | Some (Lit Nono) -> put_creates_own heap (meta_cell heap l "@proto") k (depth + 1)
+      | Some (EList [ Lit (String "d"); _; Lit (Bool true); _; _ ]) -> true
+      | Some _ -> false
+      | None ->
+          certainly_absent heap l k
+          && put_creates_own heap (meta_cell heap l "@proto") k (depth + 1))
+  | _ -> false
+
+(** Before [[Put]](loc, prop, v) (JSIL [put], extern
+    [servpips_put_prepare]): on a lazy JSON object (not a view, not an
+    array) with no cell for the concrete key [k] yet, when the [[Put]] is
+    certain to leave the own data property [k] = [{v, true, true, true}]
+    whether or not the input had a member [k] (the object is extensible and
+    the prototype chain has no setter and no read-only property [k]), store
+    a tombstone for [k] first, so that the write does not create (and
+    declare) the input member, nor fork for a name of [Object.prototype].
+    The two states differ only in the enumeration position of [k], and
+    enumerating a written lazy object is unsupported. Otherwise nothing. *)
+let put_prepare (ms : mstate) ~(loc : string) (prop : Expr.t) : unit =
+  match owner_of_aloc loc with
+  | None -> ()
+  | Some (x, i) -> (
+      let c = (Hashtbl.find infos x).classes.(i) in
+      if c.cls = Obj_cls && c.resolver = None then
+        match reduce ms prop with
+        | Lit (String k)
+          when cell ms.heap loc (str k) = None
+               && class_member c k <> None
+               && meta_cell ms.heap loc "@extensible" = Some true_
+               && put_creates_own ms.heap (meta_cell ms.heap loc "@proto") k 0 ->
+            SHeap.set_fv_pair ms.heap loc (str k) nono
+        | _ -> ())
 
 (* ------------------------------------------------------------------------ *)
 (* Memory action names (implemented by JSILSMemory)                         *)
@@ -1309,6 +1537,7 @@ let a_mark_lazy_key = "SpMarkLazyKey"
 let a_define = "SpDefine"
 let a_absent = "SpAbsent"
 let a_serialize = "SpSerialize"
+let a_put_prepare = "SpPutPrepare"
 
 (* Value trees produced by SpSerialize, handed to the caller by id. *)
 let serialized : (int, J.t) Hashtbl.t = Hashtbl.create 16
@@ -1404,7 +1633,8 @@ module Ext = struct
 
   (* Value tree through the standard JS memory actions only (GetMetadata,
      GetCell, GetAllProps): used under concrete execution, where there are
-     no lazy values. Property order is the memory's GetAllProps order. *)
+     no lazy values. Property order is the memory's GetAllProps order (E15
+     under exec --servpips). *)
   let serialize_concrete (type st vt) (env : (st, vt) env) (st : st) (v : vt) :
       J.t =
     let module E = (val env : ServpipsExterns.ENV with type st = st and type vt = vt) in
@@ -1676,7 +1906,29 @@ let x_shapes : ServpipsExterns.handler =
         [ ServpipsExterns.Return (state, E.Val.from_literal Undefined) ]);
   }
 
+(* servpips_put_prepare(l, prop): called by the JSIL [put] before [[Put]]
+   (see [put_prepare]); a no-op unless a lazy value exists (symbolic
+   execution under --servpips) *)
+let x_put_prepare : ServpipsExterns.handler =
+  {
+    run =
+      (fun (type st vt)
+           (module E : ServpipsExterns.ENV with type st = st and type vt = vt)
+           (state : st)
+           (args : vt list) ->
+        let undef = E.Val.from_literal Undefined in
+        match args with
+        | [ l; p ] when E.symbolic && active () ->
+            List.map
+              (function
+                | Ok (st, _) -> ServpipsExterns.Return (st, undef)
+                | Error _ -> engine_error "SERVPIPS memory action SpPutPrepare failed")
+              (E.State.execute_action a_put_prepare state [ l; p ])
+        | _ -> [ ServpipsExterns.Return (state, undef) ]);
+  }
+
 let () =
+  ServpipsExterns.register "servpips_put_prepare" x_put_prepare;
   ServpipsExterns.register "servpips_lazy" x_lazy;
   ServpipsExterns.register "servpips_member" x_member;
   ServpipsExterns.register "servpips_is_lazy" x_is_lazy;

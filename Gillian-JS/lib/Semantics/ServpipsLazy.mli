@@ -68,16 +68,34 @@
     (object metadata, and the reserved object [$lsp_lazy_state] for
     dirtiness), so it is copied with the state and is private to a path.
 
-    {b Enumeration} ([GetAllProps]) of a lazy JSON object, of a view, or of
-    any object whose metadata has [@sp_open] set: [unsupported]. A lazy array
-    whose length is concrete is enumerated exactly (its missing elements are
-    created first). Order: ES2020 OrdinaryOwnPropertyKeys (E15, see
+    {b Enumeration} ([GetAllProps]) of an open lazy JSON object, of a view,
+    or of any object whose metadata has [@sp_open] set: [unsupported]. A
+    lazy array whose length is concrete is enumerated exactly (its missing
+    elements are created first); a symbolic length with at most 11 feasible
+    values (0..10, e.g. a contract bound maxLen) forks over them (each
+    branch adds [len = n]), otherwise [unsupported]. A lazy object of a
+    closed struct is enumerated exactly: every member gets its cell, a member whose existence
+    is undetermined forks on "value = undefined" (absent: tombstone), and,
+    the JSON text order of an input being unknown, one branch per order of
+    the present non-index members, recorded as the object's creation order
+    and marked [@sp_enumerated] (later enumerations on the path see the same
+    order, later writes come after it); more than 3 such members that may
+    be present, or a program write before the first enumeration:
+    [unsupported]. Order: ES2020 OrdinaryOwnPropertyKeys (E15, see
     [SHeap.ordered_fields]).
 
     {b Prefetched members} ([member]): the child variable of [x] at [k]
     without materialising [x] (or of the materialised object at [k] when the
     key was not written). The same variable fills the cell if [x] is later
-    materialised as an object; [undefined] when no class admits [k].
+    materialised as an object; [undefined] when no class admits [k]. On a
+    view (an object of a class with a resolver) it is the member of the
+    underlying input value given by the class's member structure: this is
+    how a resolver reads the input it presents (e.g. the string member
+    [Body] of an S3 response, wrapped in a Buffer).
+    [SpDefine] of [length] on an object of class [Array] writes the array
+    length descriptor (writable, not enumerable, not configurable). The
+    value tree of a view reports the keys its resolver defined with a value
+    other than the input's own member as written (see {!ServpipsValue}).
 
     {1 Memory actions}
 
@@ -100,12 +118,24 @@
       true}}] (keeping the domain invariant) and [SpMarkLazyKey]; not a
       program write (no dirtiness). For resolvers ([__sp.define]).
     - [SpAbsent(o, key)] -> [[]]: raw tombstone ([__sp.absent]).
+    - [SpPutPrepare(o, key)] -> [[]]: called (extern
+      [servpips_put_prepare]) by the JSIL [put] before [[Put]]: on a lazy
+      JSON object (not a view or array) without a cell for the concrete key
+      yet, if the [[Put]] certainly leaves the own data property
+      [{v, true, true, true}] whether or not the input had that member
+      (extensible object; along the prototype chain the key is absent or
+      first found as a writable data property; no resolver or lazy object
+      on the chain), a tombstone is stored first: writing a new key neither
+      creates nor declares the input member, and does not fork for names of
+      [Object.prototype]. Otherwise nothing.
 
     {1 Externs registered here}
 
     [servpips_lazy], [servpips_member], [servpips_is_lazy] (optional second
     argument ["pristine"] (default) or ["any"]), [servpips_shapes], and the
-    addition [servpips_lazy_name(v)] (name string or [undefined]). *)
+    additions [servpips_lazy_name(v)] (name string or [undefined]) and
+    [servpips_put_prepare(o, key)] (runtime hook of the JSIL [put]; a no-op
+    unless a lazy value was registered). *)
 
 open Gillian.Gil_syntax
 module PFS = Gillian.Symbolic.Pure_context
@@ -194,6 +224,10 @@ val mark_lazy_key : mstate -> loc:string -> key:string -> unit
 val define : mstate -> loc:string -> key:string -> Expr.t -> unit
 val absent : mstate -> loc:string -> key:string -> unit
 
+(** Before [[Put]] of the key [prop] on the object at [loc] (see
+    [SpPutPrepare]). *)
+val put_prepare : mstate -> loc:string -> Expr.t -> unit
+
 (** {2 Hooks used by JSILSMemory} *)
 
 type branch = SHeap.t * Expr.t list * (string * Type.t) list * string
@@ -208,15 +242,23 @@ val get_cell_miss : mstate -> string -> Expr.t -> ret option
 (** Bookkeeping before a [SetCell] (value [none] = delete). *)
 val before_set_cell : mstate -> string -> Expr.t -> Expr.t -> unit
 
-(** [GetAllProps] hook: [Some (names, facts, types)] for lazy arrays, raises
-    [Path_end] for open objects, [None] otherwise. *)
+(** [GetAllProps] hook: [Some branches] (heap, names, new facts, new types)
+    for lazy arrays of concrete length and closed-struct lazy objects (see
+    "Enumeration" above), raises [Path_end] for open objects and views,
+    [None] otherwise. *)
 val get_all_props :
-  mstate -> string -> (Expr.t list * Expr.t list * (string * Type.t) list) option
+  mstate ->
+  string ->
+  (SHeap.t * Expr.t list * Expr.t list * (string * Type.t) list) list option
 
 (** {2 Helpers shared with ServpipsValue} *)
 
 val str : string -> Expr.t
 val reduce : mstate -> Expr.t -> Expr.t
+
+(** A literal equal to the expression on this path, when the reduction or an
+    equality of the path condition gives one. *)
+val concrete_of : mstate -> Expr.t -> Expr.t option
 val fvl_of : SHeap.t -> string -> SFVL.t
 val cell : SHeap.t -> string -> Expr.t -> Expr.t option
 val meta_cell : SHeap.t -> string -> string -> Expr.t option
@@ -230,6 +272,13 @@ val is_dirty : SHeap.t -> string -> bool
     [None] for arbitrary array elements. *)
 val children_list : string -> (string option * string) list
 
+(** Member shape (and optionality) of a key in the member structure of a
+    class, whether or not the class has a resolver (for a view: the
+    structure of the underlying input value). *)
+val class_struct_member : class_spec -> string -> (Yojson.Safe.t * bool) option
+
+(** Member LazyJSON creates itself for a key (on a [GetCell] miss): as
+    {!class_struct_member}, but none for a class with a resolver. *)
 val class_member : class_spec -> string -> (Yojson.Safe.t * bool) option
 val lazykeys_key : string
 val written_key : string
@@ -245,6 +294,7 @@ val a_mark_lazy_key : string
 val a_define : string
 val a_absent : string
 val a_serialize : string
+val a_put_prepare : string
 val stash_serialized : Yojson.Safe.t -> int
 val take_serialized : int -> Yojson.Safe.t option
 
@@ -277,6 +327,6 @@ module Ext : sig
   (** Value tree (I1 VT) of a value. Symbolic execution: [SpSerialize]
       (ServpipsValue). Concrete execution ([exec], no lazy values): the same
       format built through GetMetadata/GetCell/GetAllProps, with the concrete
-      memory's property order (not E15). *)
+      memory's property order (E15 under [exec --servpips], see [CObject]). *)
   val serialize : ('st, 'vt) env -> 'st -> 'vt -> Yojson.Safe.t
 end

@@ -242,6 +242,9 @@ proc canPut (l, prop) {
 (* *** *)
 
 proc put (l, prop, value, thrw) {
+            (* SERVPIPS (LazyJSON, WP2): a write of a new key of a lazy input
+               object does not create the input member (no-op otherwise) *)
+            pp := extern servpips_put_prepare (l, prop);
             ret := "canPut" (l, prop) with elab;
             goto [ret] cp reject;
 

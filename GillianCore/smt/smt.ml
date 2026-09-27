@@ -1337,6 +1337,13 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   | ToNumberOp when !servpips_mode ->
       let>- le = get_string le in
       Servpips_enc.str_to_num le.expr >- NumberType
+  | ToIntOp when !servpips_mode ->
+      (* SERVPIPS: ToInteger of a finite number (symbolic numbers are
+         finite, A6) is its truncation; exact, so that loops bounded by
+         num_to_int of a symbolic length (Array.prototype methods over a
+         LazyJSON array of symbolic length) keep their bound *)
+      let>- le = get_num le in
+      Servpips_enc.trunc le.expr >- NumberType
   | ToUint32Op when !servpips_mode ->
       let>- le = get_num le in
       Servpips_enc.to_uint32 le.expr >- NumberType

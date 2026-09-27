@@ -622,8 +622,12 @@ module M = struct
         if SL.active () then SL.get_all_props (sp_ms heap pfs gamma) loc_name
         else None
       with
-      | Some (names, facts, types) ->
-          Ok [ (heap, [ loc; EList names ], facts, types) ]
+      | Some branches ->
+          Ok
+            (List.map
+               (fun (heap, names, facts, types) ->
+                 (heap, [ loc; Expr.EList names ], facts, types))
+               branches)
       | None -> (
       match SHeap.get heap loc_name with
       | None ->
@@ -819,6 +823,18 @@ module M = struct
           at_loc loc (fun heap pfs gamma l ->
               SL.define (sp_ms heap pfs gamma) ~loc:l ~key:k v;
               Ok [ (heap, [], [], []) ])
+      | _ -> bad ()
+    else if action = SL.a_put_prepare then
+      match args with
+      | [ loc; k ] ->
+          if not (SL.active ()) then Ok [ (heap, [], [], []) ]
+          else
+            with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+                (match get_loc_name pfs gamma loc with
+                | Some l when SHeap.has_loc heap l ->
+                    SL.put_prepare (sp_ms heap pfs gamma) ~loc:l k
+                | _ -> ());
+                Ok [ (heap, [], [], []) ])
       | _ -> bad ()
     else if action = SL.a_absent then
       match args with

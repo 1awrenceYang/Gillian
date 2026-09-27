@@ -2,6 +2,7 @@
 
 open Gillian.Gil_syntax
 module SL = ServpipsLazy
+module FOSolver = Gillian.Logic.FOSolver
 module Servpips = Gillian.General.Servpips
 module J = Yojson.Safe
 
@@ -180,6 +181,31 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
         | Some e -> SL.reduce ms e
         | None -> raise (Opaque "model:array-without-length")
       in
+      let len =
+        match len with
+        | Lit _ -> len
+        | e -> (
+            match SL.concrete_of ms e with
+            | Some c -> c
+            | None ->
+                (* e.g. the result of Array.prototype.map over an input
+                   array of symbolic length: the path condition may entail
+                   that the length is the number m of index cells 0..m-1 *)
+                let rec count i =
+                  if i >= max_items then i
+                  else
+                    match SL.cell heap l (SL.str (string_of_int i)) with
+                    | Some (EList (Lit (String ("d" | "a")) :: _)) -> count (i + 1)
+                    | _ -> i
+                in
+                let m = Expr.Lit (Num (float_of_int (count 0))) in
+                if
+                  FOSolver.check_entailment Containers.SS.empty ms.pfs
+                    [ Expr.BinOp (e, Equal, m) ]
+                    ms.gamma
+                then m
+                else e)
+      in
       match len with
       | Lit (Num f) when Float.is_integer f && f >= 0. ->
           let n = int_of_float f in
@@ -225,7 +251,7 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
           | Some k when List.mem k skip -> None
           | Some k -> (
               (match cls with
-              | Some cls when SL.class_member cls k = None ->
+              | Some cls when SL.class_struct_member cls k = None ->
                   raise (Opaque "model:inconsistent-member")
               | _ -> ());
               Some (k, vt (depth + 1) seen (Expr.LVar c))))
@@ -246,6 +272,61 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
       let deleted = set SL.deleted_key in
       let order, _ = split_fields heap l in
       let ordered keys = List.filter (fun k -> List.mem k keys) order in
+      let cls =
+        match SL.owner_of_aloc l with
+        | Some (x', i) when x' = x -> (
+            match SL.find x with
+            | Some info -> Some info.classes.(i)
+            | None -> None)
+        | _ -> None
+      in
+      (* A view (class with a resolver): the keys its resolver defined
+         with a value other than the input's own member (e.g. a Buffer
+         wrapping the string member Body of an S3 response) are reported as
+         written, so that the tree denotes the object the program sees. A
+         defined value is the input's own member when it is the lazy value
+         named [memberPath(<name>, k)], or [undefined] for a key whose
+         existence follows its value (@sp_lazykeys). *)
+      let defined_keys =
+        match (cls, SL.find x) with
+        | Some { SL.resolver = Some _; _ }, Some info ->
+            let lazykeys = set SL.lazykeys_key in
+            let own_member k (v : Expr.t) =
+              let named c =
+                match SL.find c with
+                | Some ci -> ci.name = SL.member_path info.name k
+                | None -> false
+              in
+              let at_loc l =
+                match SL.owner_of_aloc l with
+                | Some (c, _) -> named c
+                | None -> false
+              in
+              match v with
+              | LVar c -> (
+                  named c
+                  ||
+                  (* a lazy member materialised on this path *)
+                  match SL.reduce ms v with
+                  | ALoc l | Lit (Loc l) -> at_loc l
+                  | _ -> false)
+              | ALoc l | Lit (Loc l) -> at_loc l
+              | Lit Undefined -> List.mem k lazykeys
+              | _ -> false
+            in
+            List.filter
+              (fun k ->
+                (not (List.mem k written_keys))
+                && (not (List.mem k deleted))
+                &&
+                match SL.cell heap l (SL.str k) with
+                | Some (EList [ Lit (String "d"); v; _; _; _ ]) ->
+                    not (own_member k v)
+                | Some (Lit Nono) | None -> false
+                | Some _ -> true)
+              order
+        | _ -> []
+      in
       let written =
         List.filter_map
           (fun k ->
@@ -255,7 +336,7 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
                 | `Skip -> None
                 | `Node n -> Some (k, n))
             | None -> None)
-          (ordered written_keys)
+          (ordered (written_keys @ defined_keys))
       in
       (* written but non-enumerable keys are invisible: report them deleted *)
       let hidden =
@@ -263,17 +344,11 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
           (fun k -> not (List.mem_assoc k written))
           (ordered written_keys)
       in
-      let cls =
-        match SL.owner_of_aloc l with
-        | Some (x', i) when x' = x -> (
-            match SL.find x with
-            | Some info -> Some info.classes.(i)
-            | None -> None)
-        | _ -> None
-      in
       let dirty =
         if SL.is_dirty heap x then
-          dirty_children depth seen x ~skip:(written_keys @ deleted) ~cls
+          dirty_children depth seen x
+            ~skip:(written_keys @ deleted @ defined_keys)
+            ~cls
         else []
       in
       lazy_node ~lvar:x ~aloc:(Some l) ~written:(written @ dirty)
