@@ -301,10 +301,43 @@ let enum_values (s : J.t) : Expr.t list option =
       | Some j -> Some (lits [ j ])
       | None -> None)
 
+let num_field k (j : J.t) : float option =
+  match field k j with
+  | Some (`Int n) -> Some (float_of_int n)
+  | Some (`Intlit t) -> float_of_string_opt t
+  | Some (`Float f) when Float.is_finite f -> Some f
+  | _ -> None
+
+(** Range facts of a number shape (I3 extension, all optional): [min] /
+    [max] (inclusive), [exclusiveMin] / [exclusiveMax], [int] (an integer),
+    e.g. the numbers of DynamoDB ([exclusiveMin: -1e126, exclusiveMax:
+    1e126]). *)
+let number_range (s : J.t) (x : Expr.t) : Expr.t list =
+  let n f = Expr.Lit (Num f) in
+  let bound k mk = match num_field k s with Some f -> [ mk (n f) ] | None -> [] in
+  bound "min" (fun b -> Expr.BinOp (b, FLessThanEqual, x))
+  @ bound "max" (fun b -> Expr.BinOp (x, FLessThanEqual, b))
+  @ bound "exclusiveMin" (fun b -> Expr.BinOp (b, FLessThan, x))
+  @ bound "exclusiveMax" (fun b -> Expr.BinOp (x, FLessThan, b))
+  @ if bool_field "int" s then [ Expr.UnOp (IsInt, x) ] else []
+
+let conj = function
+  | [] -> true_
+  | x :: rest -> List.fold_left (fun ac y -> Expr.BinOp (ac, And, y)) x rest
+
+let rec conjuncts (e : Expr.t) : Expr.t list =
+  match e with
+  | BinOp (a, And, b) -> conjuncts a @ conjuncts b
+  | e -> [ e ]
+
 (** Disjuncts of the JS type mask of a value of shape [s] (named [x]). The
     constraints used: [type], [enum]/[const], [optional], [nullable],
-    [union.of]; all other keys (pattern, string lengths, defaults, ...) are
-    ignored, which only weakens the mask. *)
+    [union.of], and the range of a number ({!number_range}) when the mask
+    is that number alone: the single disjunct is then the conjunction of
+    its type and range facts (in a disjunction of several types the range
+    facts are dropped: typed comparisons under a disjunction are not
+    handled by the engine's typing); all other keys (pattern, string
+    lengths, defaults, ...) are ignored, which only weakens the mask. *)
 let rec mask_disjuncts (s : J.t) (x : Expr.t) : Expr.t list =
   let s = resolve s in
   let enum_or dflt =
@@ -324,7 +357,8 @@ let rec mask_disjuncts (s : J.t) (x : Expr.t) : Expr.t list =
   let base =
     match type_of s with
     | "string" -> enum_or [ type_atom x StringType ]
-    | "number" -> enum_or [ type_atom x NumberType ]
+    | "number" ->
+        enum_or [ conj (type_atom x NumberType :: number_range s x) ]
     | "boolean" -> enum_or [ type_atom x BooleanType ]
     | "null" -> [ eq x null ]
     | "absent" -> [ eq x undef ]
@@ -342,7 +376,11 @@ let rec mask_disjuncts (s : J.t) (x : Expr.t) : Expr.t list =
     (if bool_field "optional" s then [ eq x undef ] else [])
     @ if bool_field "nullable" s then [ eq x null ] else []
   in
-  List.sort_uniq Expr.compare (base @ extra)
+  match List.sort_uniq Expr.compare (base @ extra) with
+  | [ _ ] as single -> single
+  | ds ->
+      List.sort_uniq Expr.compare
+        (List.map (fun d -> match conjuncts d with t :: _ :: _ -> t | _ -> d) ds)
 
 (* ------------------------------------------------------------------------ *)
 (* Classes                                                                  *)
@@ -492,6 +530,12 @@ let aloc_owner : (string, string * int) Hashtbl.t = Hashtbl.create 256
 let len_vars : (string, string) Hashtbl.t = Hashtbl.create 64
 let elem_counter : (string, int) Hashtbl.t = Hashtbl.create 64
 let active () = Hashtbl.length infos > 0
+
+(** Has [@sp_lazykeys] been set on some object (SpMarkLazyKey / SpDefine,
+    possibly on a program object before any lazy value exists)? *)
+let lazykeys_marked = ref false
+
+let write_hooks_active () = active () || !lazykeys_marked
 let find (x : string) : info option = Hashtbl.find_opt infos x
 let owner_of_aloc (l : string) : (string * int) option = Hashtbl.find_opt aloc_owner l
 let is_lazy_aloc (l : string) : bool = Hashtbl.mem aloc_owner l
@@ -544,24 +588,53 @@ let decl_info ?parent_aloc (info : info) : unit =
   emit_decl ?parent_name ?key ?parent_lvar ?parent_aloc ~shape:info.label
     ~open_:(open_json info) ~lvar:info.lvar ~name:info.name ~kind:info.kind ()
 
+(** The type of a mask with a single disjunct whose first conjunct is a
+    type atom (the other conjuncts, e.g. a number range, are facts). *)
 let single_gamma_type = function
-  | [ Expr.BinOp (UnOp (TypeOf, _), Equal, Lit (Type t)) ] -> (
-      match t with
-      | StringType | NumberType | BooleanType | ObjectType -> Some t
+  | [ d ] -> (
+      match conjuncts d with
+      | Expr.BinOp (UnOp (TypeOf, _), Equal, Lit (Type t)) :: _ -> (
+          match t with
+          | StringType | NumberType | BooleanType | ObjectType -> Some t
+          | _ -> None)
       | _ -> None)
   | _ -> None
 
-let new_info ~name ~kind ~(shape : J.t) ~(label : J.t) ?classes ~parent () : info =
+(** JS class tables registered for shape ids ([__servpips_classes]): every
+    lazy value created later whose shape is that id (a root registered with
+    the id, or a member / element whose shape is a reference to it, possibly
+    optional or nullable) uses this table instead of the classes derived
+    from the shape (aws2 design problem 6: DocumentClient attribute values
+    that may be a DynamoDBSet or a Buffer at any depth). *)
+let shape_class_tables : (string, class_spec list) Hashtbl.t = Hashtbl.create 16
+
+(** The shape id a (member) shape denotes: an id string, or a reference. *)
+let shape_id_of (s : J.t) : string option =
+  match s with
+  | `String id -> Some id
+  | `Assoc _ -> str_field "ref" s
+  | _ -> None
+
+let new_info ~name ~kind ~(shape : J.t) ~(label : J.t) ?classes ?shape_id ~parent () :
+    info =
   let lvar = LVar.alloc () in
   let x = Expr.LVar lvar in
   let mask = mask_disjuncts shape x in
   let may_obj = List.mem (type_atom x ObjectType) mask in
+  let registered () =
+    match (match shape_id with Some id -> Some id | None -> shape_id_of shape) with
+    | Some id -> Hashtbl.find_opt shape_class_tables id
+    | None -> None
+  in
   let classes =
     if not may_obj then [||]
     else
       match classes with
       | Some (_ :: _ as cs) -> Array.of_list cs
-      | _ -> Array.of_list (shape_classes shape)
+      | _ -> (
+          match registered () with
+          | Some (_ :: _ as cs) -> Array.of_list cs
+          | _ -> Array.of_list (shape_classes shape))
   in
   let info =
     {
@@ -584,8 +657,13 @@ let new_info ~name ~kind ~(shape : J.t) ~(label : J.t) ?classes ~parent () : inf
 let mask_facts (ms : mstate) (info : info) : Expr.t list * (string * Type.t) list =
   match info.gamma_type with
   | Some t ->
-      if Type_env.get ms.gamma info.lvar = Some t then ([], [])
-      else ([], [ (info.lvar, t) ])
+      let facts =
+        match info.mask with
+        | [ d ] -> List.filter (fun f -> not (PFS.mem ms.pfs f)) (List.tl (conjuncts d))
+        | _ -> []
+      in
+      if Type_env.get ms.gamma info.lvar = Some t then (facts, [])
+      else (facts, [ (info.lvar, t) ])
   | None ->
       let f = disj info.mask in
       if PFS.mem ms.pfs f then ([], []) else ([ f ], [])
@@ -656,6 +734,7 @@ let set_remove heap loc key s =
 let lazykeys_key = "@sp_lazykeys"
 let written_key = "@sp_written"
 let deleted_key = "@sp_deleted"
+let hidden_key = "@sp_hidden"
 let symcells_key = "@sp_symcells"
 
 (* Path-private dirtiness of lazy values: a reserved object whose cells are
@@ -754,8 +833,13 @@ let child_facts (ms : mstate) (parent : info) (i : int) (k : string) (child : in
   else
     match List.assoc_opt i contribs with
     | Some s ->
-        let r = disj (mask_disjuncts s (Expr.LVar child.lvar)) in
-        if PFS.mem ms.pfs r then (facts, types, false) else (facts @ [ r ], types, true)
+        let rs =
+          match mask_disjuncts s (Expr.LVar child.lvar) with
+          | [ d ] -> conjuncts d
+          | ds -> [ disj ds ]
+        in
+        let rs = List.filter (fun r -> not (PFS.mem ms.pfs r)) rs in
+        if rs = [] then (facts, types, false) else (facts @ rs, types, true)
     | None -> (facts, types, false)
 
 (* ------------------------------------------------------------------------ *)
@@ -807,12 +891,29 @@ let array_length_expr (info : info) (c : class_spec) : Expr.t =
   | Fixed n -> Expr.Lit (Num (float_of_int n))
   | Sym -> Expr.LVar (len_var info c)
 
+(** The metadata location of a lazy value: one for the whole run, shared by
+    its classes (a path materialises at most one class), so that it can be
+    handed out before the class is chosen (see [deferred_metadata]). *)
+let meta_alocs : (string, string) Hashtbl.t = Hashtbl.create 64
+
+let meta_owner : (string, string) Hashtbl.t = Hashtbl.create 64
+
+let meta_aloc (info : info) : string =
+  match Hashtbl.find_opt meta_alocs info.lvar with
+  | Some m -> m
+  | None ->
+      let m = ALoc.alloc () in
+      Hashtbl.replace meta_alocs info.lvar m;
+      Hashtbl.replace meta_owner m info.lvar;
+      m
+
 let mat_aloc (info : info) (i : int) : string * string =
   match Hashtbl.find_opt mat_alocs (info.lvar, i) with
   | Some p -> p
   | None ->
       let c = info.classes.(i) in
-      let al = ALoc.alloc () and alm = ALoc.alloc () in
+      let al = ALoc.alloc () in
+      let alm = meta_aloc info in
       Hashtbl.replace mat_alocs (info.lvar, i) (al, alm);
       Hashtbl.replace aloc_owner al (info.lvar, i);
       let len =
@@ -922,21 +1023,65 @@ let materialize (ms : mstate) (info : info) : branch list =
           (heap, facts, ltypes, al))
         feasible
 
-(** If [loc] is an unresolved registered lazy value, its materialisation
-    branches. *)
-let materialize_loc (ms : mstate) (loc : Expr.t) : branch list option =
+(** The registry entry of [loc] if it is an unresolved registered lazy
+    value. *)
+let unresolved_lazy (ms : mstate) (loc : Expr.t) : info option =
   let unresolved () =
     FOSolver.resolve_loc_name ~pfs:ms.pfs ~gamma:ms.gamma loc = None
   in
   match loc with
   | Lit (Loc _) | ALoc _ -> None
   | LVar x when Hashtbl.mem infos x ->
-      if unresolved () then Some (materialize ms (Hashtbl.find infos x)) else None
+      if unresolved () then Some (Hashtbl.find infos x) else None
   | _ -> (
       (* e.g. an lvar equal to a registered one *)
       match reduce ms loc with
-      | LVar x when Hashtbl.mem infos x && unresolved () ->
-          Some (materialize ms (Hashtbl.find infos x))
+      | LVar x when Hashtbl.mem infos x && unresolved () -> Some (Hashtbl.find infos x)
+      | _ -> None)
+
+(** The lazy value whose metadata location [loc] is, when that value is not
+    materialised on this path (the location is not in the heap yet). *)
+let pending_meta (ms : mstate) (loc : Expr.t) : info option =
+  match loc with
+  | ALoc m when Hashtbl.mem meta_owner m && not (SHeap.has_loc ms.heap m) ->
+      find (Hashtbl.find meta_owner m)
+  | _ -> None
+
+(** If [loc] is an unresolved registered lazy value, its materialisation
+    branches; likewise for the metadata location of a lazy value not
+    materialised on this path (the branches then continue on that
+    metadata location, which each class's object uses). *)
+let materialize_loc (ms : mstate) (loc : Expr.t) : branch list option =
+  match unresolved_lazy ms loc with
+  | Some info -> Some (materialize ms info)
+  | None -> (
+      match pending_meta ms loc with
+      | Some info ->
+          let m = meta_aloc info in
+          Some (List.map (fun (h, f, t, _) -> (h, f, t, m)) (materialize ms info))
+      | None -> None)
+
+(** [GetMetadata] of an unresolved registered lazy value that may be an
+    object: its metadata location, without materialising the value (reading
+    a field of that location later materialises it, see [materialize_loc],
+    except [@call], see [pending_meta_get_cell]). This is what lets
+    [typeof x] and IsCallable(x) (JSIL [hasField(metadata(x), "@call")])
+    answer without forking over the classes of [x]. *)
+let deferred_metadata (ms : mstate) (loc : Expr.t) : Expr.t option =
+  match unresolved_lazy ms loc with
+  | Some info when may_be_object info -> Some (Expr.ALoc (meta_aloc info))
+  | _ -> None
+
+(** [GetCell] of [@call] on the metadata location of a lazy value not
+    materialised on this path: absent, for every class (the object of a
+    lazy class never has [@call]: input values are data, never callable), so
+    no materialisation is needed. [None] for any other access. *)
+let pending_meta_get_cell (ms : mstate) (loc : Expr.t) (prop : Expr.t) : ret option =
+  match pending_meta ms loc with
+  | None -> None
+  | Some _ -> (
+      match reduce ms prop with
+      | Lit (String "@call") -> Some [ (ms.heap, [ loc; prop; nono ], [], []) ]
       | _ -> None)
 
 (* ------------------------------------------------------------------------ *)
@@ -1076,11 +1221,70 @@ let get_cell_miss (ms : mstate) (al : string) (prop : Expr.t) : ret option =
 (* Writes (SetCell / DeleteCell hooks)                                      *)
 (* ------------------------------------------------------------------------ *)
 
+(** Names that the ES / Node algorithms the models derive from a pristine
+    lazy value read by name, whether or not the member is enumerable:
+    [toJSON] (JSON.stringify), [valueOf], [length], [buffer], [type],
+    [data] and indices (Buffer.from), [toString] / [valueOf] (ToPrimitive),
+    [then] (promise resolution), and the other names of [Object.prototype].
+    Defining a non-enumerable member with such a name is a visible write. *)
+let implicitly_read_names =
+  object_prototype_names @ [ "toJSON"; "then"; "length"; "buffer"; "type"; "data" ]
+
+(** Can a member named [k] be hidden (see [hidden_write])? *)
+let hideable_name (k : string) : bool =
+  k <> ""
+  && k.[0] <> '@'
+  && (not (is_index_form k))
+  && not (List.mem k implicitly_read_names)
+
+(** The enumerable attribute of a property descriptor stored in a cell
+    ([{{"d", v, w, e, c}}] or [{{"a", g, s, e, c}}]), when it is a literal. *)
+let desc_enumerable (d : Expr.t) : bool option =
+  match d with
+  | EList [ Lit (String ("d" | "a")); _; _; Lit (Bool e); _ ] -> Some e
+  | _ -> None
+
+(** Is the program write of [value] at the concrete key [k] of the lazy
+    object [al] (class [c]) {e hidden}: invisible to the enumerable own
+    properties and to the JSON text of the value? It is when [value] is a
+    descriptor with a literal [enumerable = false] (or a deletion) of a
+    member that the input value certainly does not have and that is either
+    new or already hidden: before the write, the cell is a LazyJSON
+    tombstone (a key excluded by a closed struct, a member found absent, ...;
+    not a key the program deleted), or there is no cell and the class admits
+    no member [k], or [k] is already hidden. The name must be hideable (not
+    an index, not read by name by the derivations above) and the class must
+    have no resolver (a view's own members are its resolver's business). For
+    example the non-enumerable [$response] that the v2 SDK model defines on
+    a response. *)
+let hidden_write (ms : mstate) (al : string) (c : class_spec) (k : string)
+    (value : Expr.t) : bool =
+  let hidden_already = List.mem k (string_set ms.heap al hidden_key) in
+  c.resolver = None && hideable_name k
+  && (match value with
+     | Lit Nono -> hidden_already
+     | _ -> desc_enumerable value = Some false)
+  && (hidden_already
+     ||
+     match cell ms.heap al (str k) with
+     | Some (Lit Nono) -> not (List.mem k (string_set ms.heap al deleted_key))
+     | None -> class_member c k = None
+     | Some _ -> false)
+
 let before_set_cell (ms : mstate) (al : string) (prop : Expr.t) (value : Expr.t) :
     unit =
   match owner_of_aloc al with
-  | None -> ()
-  | Some (x, _) ->
+  | None -> (
+      (* a program object with members defined by a resolver (e.g. a
+         program-object view of the models): a program write or deletion of
+         [k] ends "k exists iff its value is not undefined" (E11) *)
+      match meta_cell ms.heap al lazykeys_key with
+      | Some (ESet (_ :: _)) -> (
+          match reduce ms prop with
+          | Lit (String k) -> set_remove ms.heap al lazykeys_key k
+          | _ -> ())
+      | _ -> ())
+  | Some (x, i) ->
       let k =
         match reduce ms prop with
         | Lit (String k) -> k
@@ -1089,14 +1293,22 @@ let before_set_cell (ms : mstate) (al : string) (prop : Expr.t) (value : Expr.t)
       if meta_cell ms.heap al symcells_key <> None then
         unsupported "write to an input array after a symbolic-index read";
       set_remove ms.heap al lazykeys_key k;
-      (match value with
-      | Lit Nono ->
-          set_remove ms.heap al written_key k;
-          set_add ms.heap al deleted_key k
-      | _ ->
-          set_remove ms.heap al deleted_key k;
-          set_add ms.heap al written_key k);
-      mark_dirty ms.heap x
+      let c = (Hashtbl.find infos x).classes.(i) in
+      if hidden_write ms al c k value then (
+        (* not a visible write: the value stays pristine *)
+        match value with
+        | Lit Nono -> set_remove ms.heap al hidden_key k
+        | _ -> set_add ms.heap al hidden_key k)
+      else (
+        set_remove ms.heap al hidden_key k;
+        (match value with
+        | Lit Nono ->
+            set_remove ms.heap al written_key k;
+            set_add ms.heap al deleted_key k
+        | _ ->
+            set_remove ms.heap al deleted_key k;
+            set_add ms.heap al written_key k);
+        mark_dirty ms.heap x)
 
 (* ------------------------------------------------------------------------ *)
 (* Enumeration (GetAllProps hook)                                           *)
@@ -1207,14 +1419,29 @@ let closed_struct_enumeration (ms : mstate) (info : info) (i : int) (loc : strin
         (Printf.sprintf
            "enumeration of input object %s: more than %d members, order unknown"
            info.name max_enum_order_keys);
+    (* hidden members (non-enumerable, defined by the program: not input
+       members) were created after every member of the input: they stay
+       after the chosen order, in their own order *)
+    let hidden heap =
+      match SHeap.ordered_fields heap loc with
+      | Ok names ->
+          let hs = string_set heap loc hidden_key in
+          List.filter_map
+            (function
+              | Expr.Lit (String k) when List.mem k hs -> Some k
+              | _ -> None)
+            names
+      | Error _ -> []
+    in
     List.concat_map
       (fun (heap, facts, types) ->
         let perms = permutations (named heap) in
         let n = List.length perms in
+        let later = hidden heap in
         List.mapi
           (fun j perm ->
             let h = if j < n - 1 then SHeap.copy heap else heap in
-            SHeap.set_creation_order h loc (List.map str perm);
+            SHeap.set_creation_order h loc (List.map str (perm @ later));
             set_meta_cell h loc enumerated_key true_;
             (h, names h, facts, types))
           perms)
@@ -1305,8 +1532,15 @@ let loc_name_of (ms : mstate) (v : Expr.t) : string option =
   | ALoc l | Lit (Loc l) -> Some l
   | _ -> FOSolver.resolve_loc_name ~pfs:ms.pfs ~gamma:ms.gamma v
 
-(** Parse the JS class table (section 3.2 [classes]). *)
-let parse_classes (ms : mstate) (shape : J.t) (v : Expr.t) : class_spec list option =
+(** Parse the JS class table (section 3.2 [classes]). An entry may give
+    [members]: the id of the shape of the member structure of its class
+    (e.g. the structure of the input a view presents); by default it is the
+    member structure of the first class of the same kind derived from
+    [shape]. With [~closed_guards] (tables registered for a shape) a guard
+    must not mention logical variables: it is used for every value of the
+    shape. *)
+let parse_classes ?(closed_guards = false) (ms : mstate) (shape : J.t) (v : Expr.t) :
+    class_spec list option =
   match v with
   | Lit Undefined | Lit Null -> None
   | _ -> (
@@ -1365,15 +1599,21 @@ let parse_classes (ms : mstate) (shape : J.t) (v : Expr.t) : class_spec list opt
           | Some (Lit Undefined) | None -> true_
           | Some g -> g
         in
+        if closed_guards && not (Containers.SS.is_empty (Expr.lvars guard)) then
+          unsupported "class table of a shape: a guard mentions a logical variable";
         let open_ =
           match p "open" with
           | Some (Lit (Bool b)) -> b
           | _ -> false
         in
         let members =
-          match List.find_opt (fun c' -> c'.cls = cls) from_shape with
-          | Some c' -> c'.members
-          | None -> if cls = Obj_cls then json_object_shape else json_array_shape
+          match p "members" with
+          | Some (Lit (String id)) -> shape_of_id id
+          | Some (Lit Undefined) | Some (Lit Null) | None -> (
+              match List.find_opt (fun c' -> c'.cls = cls) from_shape with
+              | Some c' -> c'.members
+              | None -> if cls = Obj_cls then json_object_shape else json_array_shape)
+          | Some _ -> unsupported "lazy class: members must be a shape id"
         in
         { label; cls; proto; resolver; guard; open_; members }
       in
@@ -1385,7 +1625,7 @@ let register (ms : mstate) ~(name : string) ~(shape : string) ~(kind : string)
   let s = shape_of_id shape in
   let classes = parse_classes ms s classes in
   let info =
-    new_info ~name ~kind ~shape:s ~label:(`String shape) ?classes ~parent ()
+    new_info ~name ~kind ~shape:s ~label:(`String shape) ?classes ~shape_id:shape ~parent ()
   in
   decl_info info;
   match info.mask with
@@ -1393,6 +1633,14 @@ let register (ms : mstate) ~(name : string) ~(shape : string) ~(kind : string)
   | _ ->
       let facts, types = mask_facts ms info in
       (Expr.LVar info.lvar, facts, types)
+
+(** Register the JS class table [classes] for the shape id [shape] (see
+    [shape_class_tables]); an empty table or [undefined] removes it. *)
+let register_classes (ms : mstate) ~(shape : string) ~(classes : Expr.t) : unit =
+  let s = shape_of_id shape in
+  match parse_classes ~closed_guards:true ms s classes with
+  | Some (_ :: _ as cs) -> Hashtbl.replace shape_class_tables shape cs
+  | _ -> Hashtbl.remove shape_class_tables shape
 
 (** The lazy value [v] denotes: its registry entry and, if it is materialised
     on this path, the object and class. *)
@@ -1462,6 +1710,7 @@ let lazy_name (ms : mstate) (v : Expr.t) : string option =
 let mark_lazy_key (ms : mstate) ~(loc : string) ~(key : string) : unit =
   if not (SHeap.has_loc ms.heap loc) then
     engine_error ("SERVPIPS mark_lazy_key: unknown location " ^ loc);
+  lazykeys_marked := true;
   set_add ms.heap loc lazykeys_key key
 
 let define (ms : mstate) ~(loc : string) ~(key : string) (v : Expr.t) : unit =
@@ -1556,6 +1805,8 @@ let a_define = "SpDefine"
 let a_absent = "SpAbsent"
 let a_serialize = "SpSerialize"
 let a_put_prepare = "SpPutPrepare"
+let a_classes = "SpClasses"
+let a_materialize = "SpMaterialize"
 
 (* Value trees produced by SpSerialize, handed to the caller by id. *)
 let serialized : (int, J.t) Hashtbl.t = Hashtbl.create 16
@@ -1870,7 +2121,19 @@ let x_member : ServpipsExterns.handler =
         [ ServpipsExterns.Return (st, v) ]);
   }
 
-(* __servpips_is_lazy(v, mode?) with mode "pristine" (default) or "any" *)
+(** The mode argument of [__servpips_is_lazy] / [__servpips_lazy_name]:
+    [true] for ["any"], [false] for ["pristine"] (the default) and its alias
+    ["json"]. *)
+let mode_any (type st vt) (module E : ServpipsExterns.ENV with type st = st and type vt = vt)
+    (what : string) (v : vt) ~(default : bool) : bool =
+  match E.Val.to_literal v with
+  | Some (String "any") -> true
+  | Some (String ("pristine" | "json")) -> false
+  | Some Undefined | None -> default
+  | _ -> unsupported (what ^ ": mode must be \"pristine\", \"json\" or \"any\"")
+
+(* __servpips_is_lazy(v, mode?) with mode "pristine" (default), its alias
+   "json", or "any" *)
 let x_is_lazy : ServpipsExterns.handler =
   {
     run =
@@ -1879,17 +2142,14 @@ let x_is_lazy : ServpipsExterns.handler =
            (state : st)
            (args : vt list) ->
         let env = (module E : ServpipsExterns.ENV with type st = st and type vt = vt) in
-        let any =
-          match E.Val.to_literal (nth_arg env args 1) with
-          | Some (String "any") -> true
-          | Some (String "pristine") | Some Undefined | None -> false
-          | _ -> unsupported "__servpips_is_lazy: mode must be \"pristine\" or \"any\""
-        in
+        let any = mode_any env "__servpips_is_lazy" (nth_arg env args 1) ~default:false in
         let b = Ext.is_lazy env state ~any (nth_arg env args 0) in
         [ ServpipsExterns.Return (state, E.Val.from_literal (Bool b)) ]);
   }
 
-(* __servpips_lazy_name(v): the name of a lazy value, or undefined *)
+(* __servpips_lazy_name(v, mode?): the name of a lazy value, or undefined;
+   with mode "pristine" / "json", the name only if the value is pristine
+   (one extern call for the models' derived constants, D-R3-1) *)
 let x_lazy_name : ServpipsExterns.handler =
   {
     run =
@@ -1898,12 +2158,36 @@ let x_lazy_name : ServpipsExterns.handler =
            (state : st)
            (args : vt list) ->
         let env = (module E : ServpipsExterns.ENV with type st = st and type vt = vt) in
+        let any = mode_any env "__servpips_lazy_name" (nth_arg env args 1) ~default:true in
+        let v = nth_arg env args 0 in
         let r =
-          match Ext.lazy_name env state (nth_arg env args 0) with
-          | Some s -> E.Val.from_literal (String s)
-          | None -> E.Val.from_literal Undefined
+          match Ext.lazy_name env state v with
+          | Some s when any || Ext.is_lazy env state ~any:false v ->
+              E.Val.from_literal (String s)
+          | _ -> E.Val.from_literal Undefined
         in
         [ ServpipsExterns.Return (state, r) ]);
+  }
+
+(* __servpips_classes(shapeId, classes): register a JS class table for a
+   shape id (see register_classes) *)
+let x_classes : ServpipsExterns.handler =
+  {
+    run =
+      (fun (type st vt)
+           (module E : ServpipsExterns.ENV with type st = st and type vt = vt)
+           (state : st)
+           (args : vt list) ->
+        let env = (module E : ServpipsExterns.ENV with type st = st and type vt = vt) in
+        if not (Servpips.enabled ()) then
+          unsupported "__servpips_classes needs --servpips";
+        let shape = concrete_string env "shapeId" (nth_arg env args 0) in
+        let sts =
+          Ext.run env a_classes state [ E.Val.from_literal (String shape); nth_arg env args 1 ]
+        in
+        List.map
+          (fun (st, _) -> ServpipsExterns.Return (st, E.Val.from_literal Undefined))
+          sts);
   }
 
 (* __servpips_shapes(jsonText) *)
@@ -1951,4 +2235,5 @@ let () =
   ServpipsExterns.register "servpips_member" x_member;
   ServpipsExterns.register "servpips_is_lazy" x_is_lazy;
   ServpipsExterns.register "servpips_lazy_name" x_lazy_name;
-  ServpipsExterns.register "servpips_shapes" x_shapes
+  ServpipsExterns.register "servpips_shapes" x_shapes;
+  ServpipsExterns.register "servpips_classes" x_classes

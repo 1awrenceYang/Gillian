@@ -266,6 +266,15 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
       lazy_node ~lvar:info.lvar ~aloc:None ~written ~deleted:[]
     with Opaque w -> opaque w
   and lazy_obj depth seen (x : string) (l : string) : J.t =
+    (* a lazy object that a class resolver turned into a model object (e.g.
+       the Buffer class of an unmarshalled B attribute: @sp_kind blob) is
+       serialised as that model object (aws2 design problem 5) *)
+    match SL.meta_cell heap l "@sp_kind" with
+    | Some (Lit (String "blob")) -> blob l
+    | Some (Lit (String ("date" | "stream" | "set" as k))) -> opaque k
+    | Some _ -> opaque "model:kind"
+    | None -> lazy_plain depth seen x l
+  and lazy_plain depth seen (x : string) (l : string) : J.t =
     try
       let set k = SL.string_set heap l k in
       let written_keys = set SL.written_key in

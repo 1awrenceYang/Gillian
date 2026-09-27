@@ -68,6 +68,41 @@
     (object metadata, and the reserved object [$lsp_lazy_state] for
     dirtiness), so it is copied with the state and is private to a path.
 
+    {b Hidden members.} A program write that is invisible to the enumerable
+    own properties and to the JSON text of the value does not make it dirty:
+    the definition with a literal [enumerable = false] (data or accessor
+    descriptor) of a member the input certainly does not have, or the
+    redefinition or deletion of such a member. "Certainly does not have": the
+    cell is a LazyJSON tombstone that is not a program deletion (a key
+    excluded by a closed struct, a member found absent, ...), or there is no
+    cell and the class admits no member of that name. Only objects of
+    classes without a resolver, and only names that are not indices and not
+    read by name by the algorithms the models derive from pristine values
+    ([toJSON], [then], [length], [buffer], [type], [data] and the names of
+    [Object.prototype]). Such keys are kept in the metadata set
+    [@sp_hidden]: they are own properties (GetAllProps lists them, after
+    the input's members), but they are neither written nor deleted keys of
+    the value tree. Example: the non-enumerable [$response] the v2 SDK model
+    defines on a response object, so that [JSON.stringify(response)] still
+    has the shared constant. Any other write to a hidden key makes it a
+    written key.
+
+    {b Metadata before materialisation.} The metadata location of a lazy
+    value is one location per value, shared by its classes. [GetMetadata]
+    of an unresolved lazy value that may be an object returns it without
+    materialising; reading [@call] there answers "absent" (no lazy class is
+    callable), so [typeof x] and IsCallable(x) do not fork over the classes;
+    any other action on that location materialises the value first (one
+    branch per class, continuing on the same location).
+
+    {b Class tables of shapes} ([__servpips_classes(shapeId, classes)],
+    [SpClasses]): a JS class table registered for a shape id is used, instead
+    of the classes derived from the shape, by every lazy value created later
+    whose shape is that id (a root registered with it, a member or element
+    whose shape is a reference to it). Guards of such tables must not
+    mention logical variables. An entry of any class table may give
+    [members: "<shape id>"], the member structure of its class.
+
     {b Enumeration} ([GetAllProps]) of an open lazy JSON object, of a view,
     or of any object whose metadata has [@sp_open] set: [unsupported]. A
     lazy array whose length is concrete is enumerated exactly (its missing
@@ -107,9 +142,13 @@
       first arguments must be string literals; [classes] is [undefined] or a
       JS array). Emits the root [decl].
     - [SpMember(x, key)] -> [[child]]
-    - [SpIsLazy(v, "pristine"|"any")] -> [[bool]]: [v] is a lazy value (an
-      lvar or a materialised object) and, for ["pristine"], neither it nor
-      any descendant was written on this path.
+    - [SpIsLazy(v, "pristine"|"json"|"any")] -> [[bool]]: [v] is a lazy
+      value (an lvar, materialised or not, of any type, or a materialised
+      object) and, for ["pristine"] (alias ["json"]), neither it nor any
+      descendant has a visible program write on this path (hidden members
+      do not count): its JSON text, enumerable own properties and the
+      results of the derivations listed under "Hidden members" are those of
+      the input. No materialisation, no solver call.
     - [SpLazyName(v)] -> [[name | undefined]]
     - [SpSerialize(v)] -> [[id]]: value tree of [v] (E17, see
       {!ServpipsValue}); fetch it with {!take_serialized}.
@@ -118,6 +157,10 @@
       true}}] (keeping the domain invariant) and [SpMarkLazyKey]; not a
       program write (no dirtiness). For resolvers ([__sp.define]).
     - [SpAbsent(o, key)] -> [[]]: raw tombstone ([__sp.absent]).
+    - [SpClasses(shapeId, classes)] -> [[]]: {!register_classes}.
+    - [SpMaterialize(v)] -> [[loc]]: the object location of [v], one branch
+      per class when [v] is an unresolved lazy value (what [GetMetadata]
+      did before metadata reads were deferred); [v] itself otherwise.
     - [SpPutPrepare(o, key)] -> [[]]: called (extern
       [servpips_put_prepare]) by the JSIL [put] before [[Put]]: on a lazy
       JSON object (not a view or array) without a cell for the concrete key
@@ -132,10 +175,13 @@
     {1 Externs registered here}
 
     [servpips_lazy], [servpips_member], [servpips_is_lazy] (optional second
-    argument ["pristine"] (default) or ["any"]), [servpips_shapes], and the
-    additions [servpips_lazy_name(v)] (name string or [undefined]) and
-    [servpips_put_prepare(o, key)] (runtime hook of the JSIL [put]; a no-op
-    unless a lazy value was registered). *)
+    argument ["pristine"] (default), its alias ["json"], or ["any"]),
+    [servpips_shapes], and the additions [servpips_lazy_name(v, mode?)]
+    (name string or [undefined]; with mode ["pristine"] / ["json"] the name
+    only if the value is pristine: one call for the models' derived
+    constants), [servpips_classes(shapeId, classes)] (class table of a
+    shape) and [servpips_put_prepare(o, key)] (runtime hook of the JSIL
+    [put]; a no-op unless a lazy value was registered). *)
 
 open Gillian.Gil_syntax
 module PFS = Gillian.Symbolic.Pure_context
@@ -148,8 +194,11 @@ module Type_env = Gillian.Symbolic.Type_env
     ids usable without a table: [json any ddb-out string number boolean null
     object array absent]. Shape keys used: [type], [ref], [props],
     [required], [additional], [closed], [items], [len], [minLen], [maxLen],
-    [enum], [const], [optional], [nullable], [of]; others are ignored (only
-    weakening the masks). Unknown [type]s make every use [unsupported]. *)
+    [enum], [const], [optional], [nullable], [of], and for numbers [min],
+    [max] (inclusive), [exclusiveMin], [exclusiveMax] and [int] (range facts
+    of a value whose mask is that number alone; dropped in a union, or with
+    [optional] / [nullable]); others are ignored (only weakening the
+    masks). Unknown [type]s make every use [unsupported]. *)
 val set_shapes : Yojson.Safe.t -> unit
 
 (** Parse and register a shape table text (see the .ml for the compiler's
@@ -185,6 +234,10 @@ type info = {
 
 (** Has any lazy value been registered? *)
 val active : unit -> bool
+
+(** Must [SetCell] / [DeleteCell] call {!before_set_cell}: a lazy value was
+    registered, or [@sp_lazykeys] was set on some (program) object. *)
+val write_hooks_active : unit -> bool
 
 val find : string -> info option
 
@@ -228,6 +281,9 @@ val absent : mstate -> loc:string -> key:string -> unit
     [SpPutPrepare]). *)
 val put_prepare : mstate -> loc:string -> Expr.t -> unit
 
+(** Register a JS class table for a shape id ([SpClasses]). *)
+val register_classes : mstate -> shape:string -> classes:Expr.t -> unit
+
 (** {2 Hooks used by JSILSMemory} *)
 
 type branch = SHeap.t * Expr.t list * (string * Type.t) list * string
@@ -239,8 +295,20 @@ val materialize_loc : mstate -> Expr.t -> branch list option
 (** [GetCell] miss on a lazy object ([None]: not a LazyJSON object). *)
 val get_cell_miss : mstate -> string -> Expr.t -> ret option
 
-(** Bookkeeping before a [SetCell] (value [none] = delete). *)
+(** Bookkeeping before a [SetCell] (value [none] = delete): see "Writes"
+    and "Hidden members" above; on a program object whose [@sp_lazykeys]
+    holds the key, the key leaves that set. *)
 val before_set_cell : mstate -> string -> Expr.t -> Expr.t -> unit
+
+(** [GetMetadata] of an unresolved registered lazy value that may be an
+    object: its metadata location (one per value, shared by its classes),
+    without materialising it. *)
+val deferred_metadata : mstate -> Expr.t -> Expr.t option
+
+(** [GetCell] of [@call] on the metadata location of a lazy value not
+    materialised on this path: absent, without materialising ([None] for
+    other accesses, which {!materialize_loc} handles). *)
+val pending_meta_get_cell : mstate -> Expr.t -> Expr.t -> ret option
 
 (** [GetAllProps] hook: [Some branches] (heap, names, new facts, new types)
     for lazy arrays of concrete length and closed-struct lazy objects (see
@@ -283,6 +351,7 @@ val class_member : class_spec -> string -> (Yojson.Safe.t * bool) option
 val lazykeys_key : string
 val written_key : string
 val deleted_key : string
+val hidden_key : string
 
 (** {1 Memory action names} *)
 
@@ -295,6 +364,8 @@ val a_define : string
 val a_absent : string
 val a_serialize : string
 val a_put_prepare : string
+val a_classes : string
+val a_materialize : string
 val stash_serialized : Yojson.Safe.t -> int
 val take_serialized : int -> Yojson.Safe.t option
 
