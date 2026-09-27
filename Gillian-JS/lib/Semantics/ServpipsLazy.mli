@@ -313,6 +313,6 @@ module Ext : sig
   (** Value tree (I1 VT) of a value. Symbolic execution: [SpSerialize]
       (ServpipsValue). Concrete execution ([exec], no lazy values): the same
       format built through GetMetadata/GetCell/GetAllProps, with the concrete
-      memory's property order (not E15). *)
+      memory's property order (E15 under [exec --servpips], see [CObject]). *)
   val serialize : ('st, 'vt) env -> 'st -> 'vt -> Yojson.Safe.t
 end

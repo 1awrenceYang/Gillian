@@ -1484,7 +1484,8 @@ module Ext = struct
 
   (* Value tree through the standard JS memory actions only (GetMetadata,
      GetCell, GetAllProps): used under concrete execution, where there are
-     no lazy values. Property order is the memory's GetAllProps order. *)
+     no lazy values. Property order is the memory's GetAllProps order (E15
+     under exec --servpips). *)
   let serialize_concrete (type st vt) (env : (st, vt) env) (st : st) (v : vt) :
       J.t =
     let module E = (val env : ServpipsExterns.ENV with type st = st and type vt = vt) in
