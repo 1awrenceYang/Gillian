@@ -160,11 +160,21 @@ module M = struct
                 List.iter (PFS.extend pfs') facts;
                 let gamma' = Type_env.copy gamma in
                 List.iter (fun (x, t) -> Type_env.update gamma' x t) types;
+                let n0 = PFS.length pfs' in
                 match k heap' pfs' gamma' (Expr.ALoc al) with
                 | Ok rets ->
+                    (* formulas that [k] added to this branch's path
+                       condition in place (e.g. set_metadata_core) rather
+                       than in its results: pfs' is this branch's own copy,
+                       which the caller does not see, so they are returned
+                       with the results (they used to be lost) *)
+                    let direct =
+                      List.filteri (fun i _ -> i >= n0) (PFS.to_list pfs')
+                    in
                     Ok
                       (List.map
-                         (fun (h, vs, f, ty) -> (h, vs, facts @ f, types @ ty))
+                         (fun (h, vs, f, ty) ->
+                           (h, vs, facts @ direct @ f, types @ ty))
                          rets)
                 | Error e -> Error e)
               branches
