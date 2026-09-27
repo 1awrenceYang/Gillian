@@ -2431,6 +2431,15 @@ let rec translate_expr tr_ctx e :
       | [ _; _ ] -> fail "the first argument must be a string literal"
       | _ -> fail "expected exactly two arguments")
   | JS_Parser.Syntax.Call
+      ({ JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var "__servpips_strict"; _ }, [])
+    ->
+      (* SERVPIPS [__servpips_strict()] (E10-strict): the strictness of the
+         enclosing code as the compiler sees it (the Throw flag of its
+         references), a Boolean literal. Lets the frontend check that the
+         engine's per-function strictness agrees with the source. *)
+      servpips_forms_used := true;
+      ([], Lit (Bool tr_ctx.tr_strictness), [])
+  | JS_Parser.Syntax.Call
       ({ JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var f_name; _ }, xes)
     when servpips_special_form f_name <> None ->
       (* SERVPIPS special form: [__servpips_<name>(a1, ..., an)] (callee is
