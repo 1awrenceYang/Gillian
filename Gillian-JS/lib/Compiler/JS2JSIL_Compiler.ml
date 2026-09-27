@@ -1324,10 +1324,18 @@ let rec translate_expr tr_ctx e :
       | _ ->
           (*  x_1 := o__hasProperty($lg, "x") with err *)
           let x_1 = fresh_var () in
+          (* SERVPIPS: an unbound identifier is resolved without the model-miss
+             hook of hasProperty (the global object is a model object, E11/D12;
+             a typeof probe such as Babel's typeof Symbol must give
+             "undefined"), see i__hasBinding in Internals.jsil *)
+          let has_binding =
+            if !Gillian.Utils.Config.servpips_semantics then "i__hasBinding"
+            else hasPropertyName
+          in
           let cmd_ass_x1 =
             LCall
               ( x_1,
-                Lit (String hasPropertyName),
+                Lit (String has_binding),
                 [ Lit (Loc locGlobName); Lit (String v) ],
                 Some tr_ctx.tr_err_lab,
                 None )

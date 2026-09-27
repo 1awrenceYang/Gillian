@@ -294,6 +294,22 @@ proc hasProperty (l, prop) {
 	elab: throw
 };
 
+(* SERVPIPS: resolution of an identifier bound in no scope, i.e. HasProperty of
+   the global object without the model-miss hook (under --servpips the compiler
+   calls this instead of hasProperty for unbound identifiers). An unresolvable
+   reference has ordinary JS semantics (ReferenceError, or "undefined" for
+   typeof); the frontend (A3) rejects references to Node globals that are not
+   modelled, so such a miss is not an access to an unmodelled member. Member
+   accesses on the global object (global.URL, "URL" in global) still go through
+   get / hasProperty and their hook. *)
+proc i__hasBinding (l, prop) {
+			ret := "i__getPropertyE" (l, prop) with elab;
+			ret := not (ret = undefined);
+			return;
+
+	elab: throw
+};
+
 (* ************** *)
 (* DELETEPROPERTY *)
 (* ************** *)
