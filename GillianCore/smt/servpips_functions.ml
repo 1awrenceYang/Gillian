@@ -48,6 +48,10 @@ let fixed : (string * spec) list =
     def "js.tostring" 1 s_;
     def "js.toboolean" 1 b_;
     def "js.looseeq" 2 b_;
+    (* round 3: Array.isArray of any value: false for a non-object,
+       uninterpreted for an object (the engine decides it from the class of
+       the location when it can) *)
+    def "js.isarray" 1 b_;
     (* value-level conditional (the __servpips_fn "ite" of non-Boolean
        branches), monomorphic: SMT (ite c a b) *)
     ("ite.str", { args = some [ b_; s_; s_ ]; ret = s_; smt = `Native "ite" });
@@ -378,6 +382,8 @@ let eval_concrete name (args : Literal.t list) : Literal.t option =
   | "js.tostring", [ v ] -> Option.map (fun s -> String s) (js_tostring v)
   | "js.toboolean", [ v ] -> Option.map (fun b -> Bool b) (js_toboolean v)
   | "js.looseeq", [ a; b ] -> Option.map (fun b -> Bool b) (js_looseeq a b)
+  | "js.isarray", [ (String _ | Num _ | Bool _ | Null | Undefined) ] ->
+      Some (Bool false)
   | _ -> None
 
 (* Make the builtins known to the rest of GIL (typing of boolean expressions,

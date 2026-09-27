@@ -94,7 +94,11 @@
       [FLessThan] / [FLessThanEqual] / [IsInt]) are the native GIL
       [FLessThan] / [FLessThanEqual] / [IsInt] (IEEE on literals, no fork);
       every argument must be a literal number or a value of known type Num
-      (otherwise [unsupported]). [ite(c, a, b)] with non-Boolean branches (the
+      (otherwise [unsupported]). [js.isarray(v)] (round 3, Array.isArray):
+      for a location whose [@class] the memory gives as a literal, that
+      answer ([true] iff ["Array"]); otherwise the defined builtin (false
+      for a non-object, the uninterpreted [js.isarray.other] for an
+      object). [ite(c, a, b)] with non-Boolean branches (the
       models' value-level conditional): a literal [c] selects a branch; two
       string / two finite-number branches give the builtins [ite.str] /
       [ite.num] (SMT [ite], no fork); other branch types fork on [c]; [c]

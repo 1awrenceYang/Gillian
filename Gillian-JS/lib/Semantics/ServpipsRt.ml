@@ -55,6 +55,8 @@ let builtin_names : (string * int option) list =
     ("js.tostring", Some 1);
     ("js.toboolean", Some 1);
     ("js.looseeq", Some 2);
+    (* round 3: Array.isArray of any value *)
+    ("js.isarray", Some 1);
     (* native GIL operations *)
     ("and", None);
     ("or", None);
@@ -803,6 +805,19 @@ module Make (E : X.ENV) = struct
   (* servpips_fn("<name>", a1, ...)                                      *)
   (* ------------------------------------------------------------------ *)
 
+  (* [@class] of the location [o] from its metadata, when both are single,
+     literal answers of the memory: [Some (st, class = "Array")] *)
+  let isarray_of_heap (st : st) (o : vt) : (st * bool) option =
+    match get_metadata st o with
+    | None -> None
+    | Some (st, m) -> (
+        match get_cell st m "@class" with
+        | Some (st, Some c) -> (
+            match V.to_literal c with
+            | Some (String cls) -> Some (st, cls = "Array")
+            | _ -> None)
+        | _ -> None)
+
   let rec fn (st : st) (args : vt list) : outcome list =
     match args with
     | [] -> fail_err "missing builtin name"
@@ -867,9 +882,19 @@ module Make (E : X.ENV) = struct
           | Some { smt = `Defined; _ } -> true
           | _ -> false
         in
+        (* js.isarray of a location: its class, when the heap gives a
+           literal one *)
+        let heap_isarray =
+          match (name, fargs) with
+          | "js.isarray", [ o ] when is_loc o -> isarray_of_heap st o
+          | _ -> None
+        in
         match (native, name, fargs) with
         | Some e, _, _ -> [ X.Return (st, guard (fun () -> S.eval_expr st e)) ]
         | None, "ite", [ c; a; b ] -> ite st c a b
+        | None, "js.isarray", _ when heap_isarray <> None ->
+            let st, b = Option.get heap_isarray in
+            [ X.Return (st, vbool b) ]
         | None, _, _ when defined ->
             (* evaluated on literal arguments (both modes); the conversion
                of a value of known type is simplified *)
