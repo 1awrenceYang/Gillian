@@ -847,6 +847,12 @@ module M = struct
               in
               Ok [ (heap, [ loc ], [], []) ])
       | _ -> bad ()
+    else if action = SL.a_classes then
+      match args with
+      | [ Lit (String shape); classes ] ->
+          SL.register_classes ms ~shape ~classes;
+          Ok [ (heap, [], [], []) ]
+      | _ -> bad ()
     else if action = SL.a_put_prepare then
       match args with
       | [ loc; k ] ->

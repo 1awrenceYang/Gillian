@@ -95,6 +95,14 @@
     any other action on that location materialises the value first (one
     branch per class, continuing on the same location).
 
+    {b Class tables of shapes} ([__servpips_classes(shapeId, classes)],
+    [SpClasses]): a JS class table registered for a shape id is used, instead
+    of the classes derived from the shape, by every lazy value created later
+    whose shape is that id (a root registered with it, a member or element
+    whose shape is a reference to it). Guards of such tables must not
+    mention logical variables. An entry of any class table may give
+    [members: "<shape id>"], the member structure of its class.
+
     {b Enumeration} ([GetAllProps]) of an open lazy JSON object, of a view,
     or of any object whose metadata has [@sp_open] set: [unsupported]. A
     lazy array whose length is concrete is enumerated exactly (its missing
@@ -149,6 +157,7 @@
       true}}] (keeping the domain invariant) and [SpMarkLazyKey]; not a
       program write (no dirtiness). For resolvers ([__sp.define]).
     - [SpAbsent(o, key)] -> [[]]: raw tombstone ([__sp.absent]).
+    - [SpClasses(shapeId, classes)] -> [[]]: {!register_classes}.
     - [SpMaterialize(v)] -> [[loc]]: the object location of [v], one branch
       per class when [v] is an unresolved lazy value (what [GetMetadata]
       did before metadata reads were deferred); [v] itself otherwise.
@@ -170,7 +179,8 @@
     [servpips_shapes], and the additions [servpips_lazy_name(v, mode?)]
     (name string or [undefined]; with mode ["pristine"] / ["json"] the name
     only if the value is pristine: one call for the models' derived
-    constants) and [servpips_put_prepare(o, key)] (runtime hook of the JSIL
+    constants), [servpips_classes(shapeId, classes)] (class table of a
+    shape) and [servpips_put_prepare(o, key)] (runtime hook of the JSIL
     [put]; a no-op unless a lazy value was registered). *)
 
 open Gillian.Gil_syntax
@@ -268,6 +278,9 @@ val absent : mstate -> loc:string -> key:string -> unit
     [SpPutPrepare]). *)
 val put_prepare : mstate -> loc:string -> Expr.t -> unit
 
+(** Register a JS class table for a shape id ([SpClasses]). *)
+val register_classes : mstate -> shape:string -> classes:Expr.t -> unit
+
 (** {2 Hooks used by JSILSMemory} *)
 
 type branch = SHeap.t * Expr.t list * (string * Type.t) list * string
@@ -348,6 +361,7 @@ val a_define : string
 val a_absent : string
 val a_serialize : string
 val a_put_prepare : string
+val a_classes : string
 val a_materialize : string
 val stash_serialized : Yojson.Safe.t -> int
 val take_serialized : int -> Yojson.Safe.t option

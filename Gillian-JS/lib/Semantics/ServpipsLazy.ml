@@ -539,17 +539,41 @@ let single_gamma_type = function
       | _ -> None)
   | _ -> None
 
-let new_info ~name ~kind ~(shape : J.t) ~(label : J.t) ?classes ~parent () : info =
+(** JS class tables registered for shape ids ([__servpips_classes]): every
+    lazy value created later whose shape is that id (a root registered with
+    the id, or a member / element whose shape is a reference to it, possibly
+    optional or nullable) uses this table instead of the classes derived
+    from the shape (aws2 design problem 6: DocumentClient attribute values
+    that may be a DynamoDBSet or a Buffer at any depth). *)
+let shape_class_tables : (string, class_spec list) Hashtbl.t = Hashtbl.create 16
+
+(** The shape id a (member) shape denotes: an id string, or a reference. *)
+let shape_id_of (s : J.t) : string option =
+  match s with
+  | `String id -> Some id
+  | `Assoc _ -> str_field "ref" s
+  | _ -> None
+
+let new_info ~name ~kind ~(shape : J.t) ~(label : J.t) ?classes ?shape_id ~parent () :
+    info =
   let lvar = LVar.alloc () in
   let x = Expr.LVar lvar in
   let mask = mask_disjuncts shape x in
   let may_obj = List.mem (type_atom x ObjectType) mask in
+  let registered () =
+    match (match shape_id with Some id -> Some id | None -> shape_id_of shape) with
+    | Some id -> Hashtbl.find_opt shape_class_tables id
+    | None -> None
+  in
   let classes =
     if not may_obj then [||]
     else
       match classes with
       | Some (_ :: _ as cs) -> Array.of_list cs
-      | _ -> Array.of_list (shape_classes shape)
+      | _ -> (
+          match registered () with
+          | Some (_ :: _ as cs) -> Array.of_list cs
+          | _ -> Array.of_list (shape_classes shape))
   in
   let info =
     {
@@ -1437,8 +1461,15 @@ let loc_name_of (ms : mstate) (v : Expr.t) : string option =
   | ALoc l | Lit (Loc l) -> Some l
   | _ -> FOSolver.resolve_loc_name ~pfs:ms.pfs ~gamma:ms.gamma v
 
-(** Parse the JS class table (section 3.2 [classes]). *)
-let parse_classes (ms : mstate) (shape : J.t) (v : Expr.t) : class_spec list option =
+(** Parse the JS class table (section 3.2 [classes]). An entry may give
+    [members]: the id of the shape of the member structure of its class
+    (e.g. the structure of the input a view presents); by default it is the
+    member structure of the first class of the same kind derived from
+    [shape]. With [~closed_guards] (tables registered for a shape) a guard
+    must not mention logical variables: it is used for every value of the
+    shape. *)
+let parse_classes ?(closed_guards = false) (ms : mstate) (shape : J.t) (v : Expr.t) :
+    class_spec list option =
   match v with
   | Lit Undefined | Lit Null -> None
   | _ -> (
@@ -1497,15 +1528,21 @@ let parse_classes (ms : mstate) (shape : J.t) (v : Expr.t) : class_spec list opt
           | Some (Lit Undefined) | None -> true_
           | Some g -> g
         in
+        if closed_guards && not (Containers.SS.is_empty (Expr.lvars guard)) then
+          unsupported "class table of a shape: a guard mentions a logical variable";
         let open_ =
           match p "open" with
           | Some (Lit (Bool b)) -> b
           | _ -> false
         in
         let members =
-          match List.find_opt (fun c' -> c'.cls = cls) from_shape with
-          | Some c' -> c'.members
-          | None -> if cls = Obj_cls then json_object_shape else json_array_shape
+          match p "members" with
+          | Some (Lit (String id)) -> shape_of_id id
+          | Some (Lit Undefined) | Some (Lit Null) | None -> (
+              match List.find_opt (fun c' -> c'.cls = cls) from_shape with
+              | Some c' -> c'.members
+              | None -> if cls = Obj_cls then json_object_shape else json_array_shape)
+          | Some _ -> unsupported "lazy class: members must be a shape id"
         in
         { label; cls; proto; resolver; guard; open_; members }
       in
@@ -1517,7 +1554,7 @@ let register (ms : mstate) ~(name : string) ~(shape : string) ~(kind : string)
   let s = shape_of_id shape in
   let classes = parse_classes ms s classes in
   let info =
-    new_info ~name ~kind ~shape:s ~label:(`String shape) ?classes ~parent ()
+    new_info ~name ~kind ~shape:s ~label:(`String shape) ?classes ~shape_id:shape ~parent ()
   in
   decl_info info;
   match info.mask with
@@ -1525,6 +1562,14 @@ let register (ms : mstate) ~(name : string) ~(shape : string) ~(kind : string)
   | _ ->
       let facts, types = mask_facts ms info in
       (Expr.LVar info.lvar, facts, types)
+
+(** Register the JS class table [classes] for the shape id [shape] (see
+    [shape_class_tables]); an empty table or [undefined] removes it. *)
+let register_classes (ms : mstate) ~(shape : string) ~(classes : Expr.t) : unit =
+  let s = shape_of_id shape in
+  match parse_classes ~closed_guards:true ms s classes with
+  | Some (_ :: _ as cs) -> Hashtbl.replace shape_class_tables shape cs
+  | _ -> Hashtbl.remove shape_class_tables shape
 
 (** The lazy value [v] denotes: its registry entry and, if it is materialised
     on this path, the object and class. *)
@@ -1689,6 +1734,7 @@ let a_define = "SpDefine"
 let a_absent = "SpAbsent"
 let a_serialize = "SpSerialize"
 let a_put_prepare = "SpPutPrepare"
+let a_classes = "SpClasses"
 let a_materialize = "SpMaterialize"
 
 (* Value trees produced by SpSerialize, handed to the caller by id. *)
@@ -2052,6 +2098,27 @@ let x_lazy_name : ServpipsExterns.handler =
         [ ServpipsExterns.Return (state, r) ]);
   }
 
+(* __servpips_classes(shapeId, classes): register a JS class table for a
+   shape id (see register_classes) *)
+let x_classes : ServpipsExterns.handler =
+  {
+    run =
+      (fun (type st vt)
+           (module E : ServpipsExterns.ENV with type st = st and type vt = vt)
+           (state : st)
+           (args : vt list) ->
+        let env = (module E : ServpipsExterns.ENV with type st = st and type vt = vt) in
+        if not (Servpips.enabled ()) then
+          unsupported "__servpips_classes needs --servpips";
+        let shape = concrete_string env "shapeId" (nth_arg env args 0) in
+        let sts =
+          Ext.run env a_classes state [ E.Val.from_literal (String shape); nth_arg env args 1 ]
+        in
+        List.map
+          (fun (st, _) -> ServpipsExterns.Return (st, E.Val.from_literal Undefined))
+          sts);
+  }
+
 (* __servpips_shapes(jsonText) *)
 let x_shapes : ServpipsExterns.handler =
   {
@@ -2097,4 +2164,5 @@ let () =
   ServpipsExterns.register "servpips_member" x_member;
   ServpipsExterns.register "servpips_is_lazy" x_is_lazy;
   ServpipsExterns.register "servpips_lazy_name" x_lazy_name;
-  ServpipsExterns.register "servpips_shapes" x_shapes
+  ServpipsExterns.register "servpips_shapes" x_shapes;
+  ServpipsExterns.register "servpips_classes" x_classes
