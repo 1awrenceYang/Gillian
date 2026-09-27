@@ -40,7 +40,7 @@ let enable (c : config) =
   config_ref := Some c;
   enabled_ref := true;
   start_time := Unix.gettimeofday ();
-  Smt.servpips_mode := true
+  Smt.servpips_enable ()
 
 (* Non-finite floats are not JSON: encode them as {"nonfinite": ...}. *)
 let rec encode_nonfinite (j : Yojson.Safe.t) : Yojson.Safe.t =
@@ -105,7 +105,8 @@ let fork_commit () =
   | Some s when s <> "" -> s
   | _ -> "unknown"
 
-let hello_builtins : (unit -> Yojson.Safe.t) ref = ref (fun () -> `Assoc [])
+let hello_builtins : (unit -> Yojson.Safe.t) ref =
+  ref Smt.Servpips_functions.hello_json
 
 let hello ~unroll () =
   if !enabled_ref then

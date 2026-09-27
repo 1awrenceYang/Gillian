@@ -82,8 +82,9 @@ val note :
     [SERVPIPS_FORK_COMMIT], set in the engine image; ["unknown"] otherwise). *)
 val fork_commit : unit -> string
 
-(** Extra [hello] field [builtins] (the SMT-LIB text of builtin definitions,
-    e.g. the [str.in_re.numlit] regex). Default: [`Assoc []]. *)
+(** Extra [hello] field [builtins] (the SMT-LIB text of builtin definitions):
+    by default [Servpips_functions.hello_json], i.e.
+    [{"str.in_re.numlit": "<regex text>"}]. *)
 val hello_builtins : (unit -> Yojson.Safe.t) ref
 
 (** Emit the [hello] event:

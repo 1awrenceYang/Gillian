@@ -1,6 +1,6 @@
 (executable
  (name run_tests)
- (libraries alcotest gil_syntax_tests gillian))
+ (libraries alcotest gil_syntax_tests gillian gillian.engine gillian.smt))
 
 (rule
  (alias runtest)

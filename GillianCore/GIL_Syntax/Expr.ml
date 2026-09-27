@@ -579,7 +579,12 @@ let push_in_negations, negate =
   in
   (f_off, f_on)
 
+(* SERVPIPS: names of builtin functions (FuncApp) whose result is a boolean;
+   set by [Smt.Servpips_functions]. *)
+let bool_func_hook : (string -> bool) ref = ref (fun _ -> false)
+
 let rec is_boolean_expr : t -> bool = function
+  | FuncApp (n, _) when !bool_func_hook n -> true
   | LVar _ | PVar _
   | Lit (Bool _)
   | BinOp (_, FLessThan, _)

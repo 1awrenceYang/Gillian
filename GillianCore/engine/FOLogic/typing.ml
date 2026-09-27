@@ -166,6 +166,14 @@ module Infer_types_to_gamma = struct
             List_utils.lengths_eq field_types les
             && tt = Datatype_env.get_constructor_type_exn n
             && check_fields les field_types)
+    | FuncApp (n, les) when Smt.Servpips_functions.is_builtin n -> (
+        (* SERVPIPS builtin: known argument and result types *)
+        match Smt.Servpips_functions.lookup n with
+        | Some spec ->
+            tt = spec.ret
+            && List_utils.lengths_eq spec.args les
+            && List.for_all2 f les spec.args
+        | None -> false)
     | FuncApp (n, les) -> (
         match Function_env.get_function_param_types n with
         | None -> false
@@ -535,12 +543,23 @@ module Type_lexpr = struct
     | None -> def_neg
 
   and type_func_app gamma n les =
+    match Smt.Servpips_functions.lookup n with
+    | Some spec ->
+        (* SERVPIPS builtin: typable iff the arguments have the parameter
+           types; the result type is known *)
+        let tts = List.map Option.some spec.args in
+        if
+          List_utils.lengths_eq tts les
+          && typable_list gamma ?target_types:(Some tts) les
+        then def_pos (Some spec.ret)
+        else def_neg
+    | None -> (
     match Function_env.get_function_param_types n with
     | Some tts ->
         if typable_list gamma ?target_types:(Some tts) les then
           def_pos (Datatype_env.get_constructor_type n)
         else def_neg
-    | None -> def_neg
+    | None -> def_neg)
 
   and type_case gamma t_scrutinee (c, bs, le) =
     let t_constructor = Datatype_env.get_constructor_type c in

@@ -939,7 +939,25 @@ and reduce_lexpr_loop
     (* -------------------------
          Function Application
        ------------------------- *)
-    | FuncApp (n, les) -> FuncApp (n, List.map f les)
+    | FuncApp (n, les) -> (
+        let les = List.map f les in
+        (* SERVPIPS: native builtins are evaluated on literal arguments
+           (uninterpreted ones never are) *)
+        let lits =
+          List.filter_map
+            (function
+              | Expr.Lit l -> Some l
+              | _ -> None)
+            les
+        in
+        if
+          List.length lits = List.length les
+          && Smt.Servpips_functions.is_builtin n
+        then
+          match Smt.Servpips_functions.eval_concrete n lits with
+          | Some l -> Lit l
+          | None -> FuncApp (n, les)
+        else FuncApp (n, les))
     (* -------------------------
                  Cases
        ------------------------- *)

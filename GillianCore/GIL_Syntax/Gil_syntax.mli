@@ -395,6 +395,10 @@ module Expr : sig
   (** [negate e] negates the expression, recursively *)
   val negate : t -> t
 
+  (** SERVPIPS: recognises the builtin functions whose result is a boolean
+      (set by [Smt.Servpips_functions]); used by {!is_boolean_expr}. *)
+  val bool_func_hook : (string -> bool) ref
+
   (** Returns if this expression is a boolean expression, recursively. *)
   val is_boolean_expr : t -> bool
 
@@ -1247,6 +1251,11 @@ module Prog_env : sig
 
   module Function_env : sig
     type t
+
+    (** SERVPIPS builtin functions, added to every function environment
+        (user functions with the same name take precedence). Set by
+        [Smt.Servpips_functions]. *)
+    val builtins : (string * Func.t) list ref
 
     val make' : (string, Func.t) Hashtbl.t -> t
     val make : ('a, 'b) Prog.t -> t

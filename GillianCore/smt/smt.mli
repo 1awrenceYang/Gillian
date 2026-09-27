@@ -1,5 +1,8 @@
 open Gil_syntax
 
+(** SERVPIPS builtin functions (see {!Servpips_functions}). *)
+module Servpips_functions = Servpips_functions
+
 exception SMT_unknown
 exception SMT_error of string
 
@@ -10,6 +13,16 @@ exception SMT_error of string
     instead of raising, and any exception raised while encoding a query is
     re-raised as {!SMT_encoding_failure}. *)
 val servpips_mode : bool ref
+
+(** Turn SERVPIPS mode on (idempotent): sets {!servpips_mode} and sends
+    [(set-option :encoding bmp)] (strings are sequences of UTF-16 code
+    units; also re-sent when the solver is restarted). In SERVPIPS mode the
+    encodings of [ToStringOp], [ToNumberOp], [ToUint32Op], [ToInt32Op],
+    [ToUint16Op], [FMod], [M_floor], [M_ceil], [M_abs], [M_sgn] and [M_round]
+    are the SERVPIPS ones (design 4.4, 4.5, E5, E6), and non-finite number
+    literals are an encoding failure (E7). Builtin functions
+    ({!Servpips_functions}) are encoded in both modes. *)
+val servpips_enable : unit -> unit
 
 (** Number of queries actually sent to the solver (cache hits excluded). *)
 val query_count : int ref

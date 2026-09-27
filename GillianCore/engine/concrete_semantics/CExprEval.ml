@@ -330,6 +330,30 @@ and evaluate_expr (store : CStore.t) (e : Expr.t) : CVal.M.t =
     | NOp (nop, le) -> evaluate_nop nop (List.map ee le)
     | EList ll -> evaluate_elist store ll
     | LstSub (e1, e2, e3) -> evaluate_lstsub store e1 e2 e3
+    | FuncApp (n, les) when Smt.Servpips_functions.is_builtin n -> (
+        (* SERVPIPS builtins: native ones are evaluated with their SMT-LIB
+           semantics; uninterpreted ones have no concrete semantics here *)
+        let lits = List.map ee les in
+        match Smt.Servpips_functions.lookup n with
+        | Some { smt = `Uf; _ } ->
+            raise
+              (Servpips.Path_end
+                 {
+                   status = "unsupported";
+                   reason = "uninterpreted builtin " ^ n ^ " in concrete execution";
+                 })
+        | _ -> (
+            match Smt.Servpips_functions.eval_concrete n lits with
+            | Some l -> l
+            | None ->
+                raise
+                  (Servpips.Path_end
+                     {
+                       status = "unsupported";
+                       reason =
+                         Fmt.str "builtin %s not evaluable on %a" n
+                           (Fmt.Dump.list Literal.pp) lits;
+                     })))
     | ALoc _
     | LVar _
     | ESet _
@@ -343,6 +367,7 @@ and evaluate_expr (store : CStore.t) (e : Expr.t) : CVal.M.t =
              "eval_expr concrete: aloc, lvar, set, exists, for all, case, \
               constructor or function application")
   with
+  | Servpips.Path_end _ as e -> raise e
   | TypeError msg -> raise (TypeError (msg ^ Fmt.str " in %a" Expr.pp e))
   | EvaluationError msg ->
       raise (EvaluationError (msg ^ Fmt.str " in %a" Expr.pp e))

@@ -130,7 +130,15 @@ module Function_env = struct
   type _ Effect.t += Get_function_env : t Effect.t
 
   let get () = Effect.perform Get_function_env
-  let make' func_tbl = Hashtbl.fold StringMap.add func_tbl StringMap.empty
+  let builtins : (string * Func.t) list ref = ref []
+
+  let make' func_tbl =
+    let base =
+      List.fold_left
+        (fun m (n, f) -> StringMap.add n f m)
+        StringMap.empty !builtins
+    in
+    Hashtbl.fold StringMap.add func_tbl base
   let make prog = make' prog.Prog.funcs
 
   let using (t : t) f =
