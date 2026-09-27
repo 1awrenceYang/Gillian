@@ -885,23 +885,19 @@ let materialize (ms : mstate) (info : info) : branch list =
 (** If [loc] is an unresolved registered lazy value, its materialisation
     branches. *)
 let materialize_loc (ms : mstate) (loc : Expr.t) : branch list option =
-  let lazy_lvar (e : Expr.t) =
-    match e with
-    | LVar x when Hashtbl.mem infos x -> Some x
-    | _ -> None
+  let unresolved () =
+    FOSolver.resolve_loc_name ~pfs:ms.pfs ~gamma:ms.gamma loc = None
   in
-  match lazy_lvar loc with
-  | None -> (
+  match loc with
+  | Lit (Loc _) | ALoc _ -> None
+  | LVar x when Hashtbl.mem infos x ->
+      if unresolved () then Some (materialize ms (Hashtbl.find infos x)) else None
+  | _ -> (
+      (* e.g. an lvar equal to a registered one *)
       match reduce ms loc with
-      | LVar x when Hashtbl.mem infos x ->
-          if FOSolver.resolve_loc_name ~pfs:ms.pfs ~gamma:ms.gamma loc = None then
-            Some (materialize ms (Hashtbl.find infos x))
-          else None
+      | LVar x when Hashtbl.mem infos x && unresolved () ->
+          Some (materialize ms (Hashtbl.find infos x))
       | _ -> None)
-  | Some x ->
-      if FOSolver.resolve_loc_name ~pfs:ms.pfs ~gamma:ms.gamma loc = None then
-        Some (materialize ms (Hashtbl.find infos x))
-      else None
 
 (* ------------------------------------------------------------------------ *)
 (* Member access on materialised lazy objects (GetCell miss)               *)

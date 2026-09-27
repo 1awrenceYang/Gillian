@@ -259,9 +259,9 @@ let serialize (heap : SHeap.t) pfs gamma (v : Expr.t) : J.t =
   serialize_ms { SL.heap; pfs; gamma } v
 
 (* ------------------------------------------------------------------------ *)
-(* Debug extern (not part of I2-SF): __servpips_debug_vt(tag, v) emits       *)
-(* {"ev":"note","code":"vt","msg":tag,"site":null,                           *)
-(*  "data":{"vt":<VT of v>,"pc":<PC>,"types":<T>}}.                          *)
+(* Debug extern (not part of I2-SF): __servpips_debug_vt(tag, v, withPc)    *)
+(* emits {"ev":"note","code":"vt","msg":tag,"site":null,"data":{"vt":<VT>}}  *)
+(* and, when withPc is true, also "pc" and "types" of the current state.    *)
 (* Used by the servpips_mem_* regression tests of E17.                       *)
 (* ------------------------------------------------------------------------ *)
 
@@ -275,30 +275,37 @@ let x_debug_vt : ServpipsExterns.handler =
         let env =
           (module E : ServpipsExterns.ENV with type st = st and type vt = vt)
         in
-        let tag, v =
+        let tag, v, with_pc =
           match args with
-          | t :: v :: _ -> (
+          | t :: v :: rest -> (
               ( (match E.Val.to_literal t with
                 | Some (String s) -> s
                 | _ -> Fmt.to_to_string E.Val.pp t),
-                v ))
-          | [ v ] -> ("", v)
-          | [] -> ("", E.Val.from_literal Undefined)
+                v,
+                match rest with
+                | p :: _ -> E.Val.to_literal p = Some (Bool true)
+                | [] -> false ))
+          | [ v ] -> ("", v, false)
+          | [] -> ("", E.Val.from_literal Undefined, false)
         in
         let j = SL.Ext.serialize env state v in
         let pc, types =
-          Servpips.pc_and_types_of_asrt
-            (E.State.to_assertions ~to_keep:Containers.SS.empty state)
+          if with_pc then
+            Servpips.pc_and_types_of_asrt
+              (E.State.to_assertions ~to_keep:Containers.SS.empty state)
+          else ([], [])
         in
-        Servpips.note ~code:"vt" ~msg:tag
-          ~data:
-            (`Assoc
+        let data =
+          if with_pc then
+            `Assoc
               [
                 ("vt", j);
                 ("pc", Servpips.pc_json pc);
                 ("types", Servpips.types_json types);
-              ])
-          ();
+              ]
+          else `Assoc [ ("vt", j) ]
+        in
+        Servpips.note ~code:"vt" ~msg:tag ~data ();
         [ ServpipsExterns.Return (state, E.Val.from_literal Undefined) ]);
   }
 
