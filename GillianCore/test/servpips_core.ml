@@ -554,6 +554,97 @@ let test_pfs_index () =
     done
   done
 
+(* ---- round 2 (perf): stamps, typing without commits, negate, alias ---- *)
+
+let test_stamps () =
+  Config.servpips_semantics := true;
+  let p = PFS.of_list [ eq (lv "#a") (num 1.) ] in
+  let g0 = PFS.generation p in
+  let q = PFS.copy p in
+  Alcotest.(check int) "copy keeps the stamp" g0 (PFS.generation q);
+  PFS.extend q (eq (lv "#b") (num 2.));
+  Alcotest.(check bool) "extend renews the stamp" true (PFS.generation q <> g0);
+  Alcotest.(check int) "the original is untouched" g0 (PFS.generation p);
+  PFS.extend p (eq (lv "#a") (num 1.));
+  Alcotest.(check int) "extending with a present formula keeps it" g0
+    (PFS.generation p);
+  let r = PFS.of_list [ eq (lv "#a") (num 1.) ] in
+  Alcotest.(check bool) "a new set has its own stamp" true
+    (PFS.generation r <> g0);
+  let t = Type_env.init () in
+  Type_env.update t "#a" Type.NumberType;
+  let s0 = Type_env.generation t in
+  let t' = Type_env.copy t in
+  Alcotest.(check int) "env copy keeps the stamp" s0 (Type_env.generation t');
+  Type_env.update t' "#a" Type.NumberType;
+  Alcotest.(check int) "same binding keeps it" s0 (Type_env.generation t');
+  Type_env.update t' "#b" Type.StringType;
+  Alcotest.(check bool) "new binding renews it" true
+    (Type_env.generation t' <> s0);
+  Type_env.remove t "#zz";
+  Alcotest.(check int) "removing an absent variable keeps it" s0
+    (Type_env.generation t)
+
+let test_typing_no_commit () =
+  Config.servpips_semantics := true;
+  let gamma = Type_env.init () in
+  let t, ok = Typing.type_lexpr gamma (Expr.UnOp (ToNumberOp, lv "#n")) in
+  Alcotest.(check bool) "typable" true ok;
+  Alcotest.(check bool) "number" true (t = Some Type.NumberType);
+  Alcotest.(check bool) "#n : Str not added to gamma" true
+    (Type_env.get gamma "#n" = None);
+  (* reverse typing infers nothing from a disjunct *)
+  let f =
+    Expr.BinOp
+      ( eq (lv "#u") (lv "#s"),
+        Or,
+        Expr.BinOp (Expr.UnOp (ToNumberOp, lv "#n"), FLessThan, num 3.) )
+  in
+  match Typing.reverse_type_lexpr true gamma [ (f, Type.BooleanType) ] with
+  | Some g -> Alcotest.(check bool) "no #n from the disjunct" true (Type_env.get g "#n" = None)
+  | None -> Alcotest.fail "disjunction not typable"
+
+let test_negate_nan () =
+  Config.servpips_semantics := true;
+  let nan = num Float.nan in
+  let a = Expr.BinOp (nan, FLessThan, lv "#x") in
+  Alcotest.(check bool) "not (NaN < x) stays a negation" true
+    (match Expr.negate a with
+    | Expr.UnOp (Not, BinOp (Lit (Num f), FLessThan, LVar "#x")) ->
+        Float.is_nan f
+    | _ -> false);
+  let b = Expr.BinOp (num 1., FLessThan, lv "#x") in
+  Alcotest.(check bool) "not (1 < x) is x <= 1" true
+    (Expr.negate b = Expr.BinOp (lv "#x", FLessThanEqual, num 1.))
+
+let test_input_not_loc () =
+  Config.servpips_semantics := true;
+  let saved = !Reduction.servpips_input_not_loc in
+  Reduction.servpips_input_not_loc := (fun x l -> x = "#in" && l <> "#mine");
+  let r e = Reduction.reduce_lexpr e in
+  Alcotest.(check bool) "input vs other object" true
+    (r (eq (lv "#in") (Expr.ALoc "#other")) = Expr.false_);
+  Alcotest.(check bool) "input vs concrete location" true
+    (r (eq (Expr.Lit (Loc "$lg")) (lv "#in")) = Expr.false_);
+  Alcotest.(check bool) "input vs its own location stays" true
+    (r (eq (lv "#in") (Expr.ALoc "#mine")) <> Expr.false_);
+  Alcotest.(check bool) "other variable stays" true
+    (r (eq (lv "#y") (Expr.ALoc "#other")) <> Expr.false_);
+  Reduction.servpips_input_not_loc := saved
+
+let test_msgn_copysign () =
+  (* the JSIL runtime (i__sameValue, Math.min/max) tells -0 from +0 with
+     M_sgn: it must stay copysign(1, x) under SERVPIPS semantics *)
+  let chk x exp =
+    Alcotest.(check (float 0.)) (Fmt.str "M_sgn %h" x) exp (unop M_sgn x)
+  in
+  chk 0. 1.;
+  chk (-0.) (-1.);
+  chk 5. 1.;
+  chk (-5.) (-1.);
+  chk Float.infinity 1.;
+  chk Float.neg_infinity (-1.)
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -578,9 +669,14 @@ let tests : unit Alcotest.test_case list =
     ("V1b Math.floor vs Node", `Quick, test_unary "floor" (unop M_floor) ~exact_zero:true);
     ("V1b Math.ceil vs Node", `Quick, test_unary "ceil" (unop M_ceil) ~exact_zero:true);
     ("V1b Math.round vs Node", `Quick, test_unary "round" (unop M_round) ~exact_zero:true);
-    ("V1b Math.sign vs Node", `Quick, test_unary "sign" (unop M_sgn) ~exact_zero:true);
+    ("V1b Math.sign (Arith_utils.js_sign) vs Node", `Quick, test_unary "sign" Arith_utils.js_sign ~exact_zero:true);
+    ("M_sgn is copysign(1, x) (R2)", `Quick, test_msgn_copysign);
     ("V1b Math.abs vs Node", `Quick, test_unary "abs" (unop M_abs) ~exact_zero:true);
     ("V1b % (fmod) vs Node", `Quick, test_fmod);
     ("Ext_list.remove_duplicates keeps the list consistent", `Quick, test_ext_list_remove_duplicates);
     ("E19 PFS index = list", `Quick, test_pfs_index);
+    ("E19 PFS / Type_env stamps", `Quick, test_stamps);
+    ("typing does not commit inferred types", `Quick, test_typing_no_commit);
+    ("E7 negate keeps NaN comparisons", `Quick, test_negate_nan);
+    ("input never equals another location", `Quick, test_input_not_loc);
   ]

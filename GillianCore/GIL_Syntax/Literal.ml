@@ -108,6 +108,29 @@ let evaluate_constant (c : Constant.t) : t =
       let _, tl = Float.modf (lctime *. 1e+3) in
       Num (float_of_int (int_of_float tl))
 
+
+(** SERVPIPS: [l] with its deterministic constants (Min_float, Max_float,
+    MaxSafeInteger, Epsilon, Pi; also inside literal lists) replaced by their
+    values; [None] when there is none. Random, UTCTime and LocalTime stay. *)
+let rec servpips_lower_constants (l : t) : t option =
+  match l with
+  | Constant ((Min_float | Max_float | MaxSafeInteger | Epsilon | Pi) as c) ->
+      Some (evaluate_constant c)
+  | LList ls ->
+      let changed = ref false in
+      let ls' =
+        List.map
+          (fun l ->
+            match servpips_lower_constants l with
+            | Some l' ->
+                changed := true;
+                l'
+            | None -> l)
+          ls
+      in
+      if !changed then Some (LList ls') else None
+  | _ -> None
+
 let from_list lits = LList lits
 
 let to_list lit =

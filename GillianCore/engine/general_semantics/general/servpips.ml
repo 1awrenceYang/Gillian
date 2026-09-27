@@ -18,6 +18,7 @@ let default_config () =
   }
 
 let enabled_ref = ref false
+let start_sampler_ref : (unit -> unit) ref = ref (fun () -> ())
 let start_time = ref (Unix.gettimeofday ())
 let config_ref : config option ref = ref None
 let chan : out_channel option ref = ref None
@@ -41,7 +42,19 @@ let enable (c : config) =
   enabled_ref := true;
   start_time := Unix.gettimeofday ();
   Config.servpips_semantics := true;
-  Smt.servpips_enable ()
+  Smt.servpips_enable ();
+  !start_sampler_ref ()
+
+(* [gillian-js compile --servpips]: compile exactly as [wpst --servpips]
+   would (same preamble, same SERVPIPS compilation), without an event log. *)
+let enable_compile ~runtime_dir =
+  (match !chan with
+  | Some oc -> close_out_noerr oc
+  | None -> ());
+  chan := None;
+  config_ref := Some { (default_config ()) with runtime_dir };
+  enabled_ref := true;
+  Config.servpips_semantics := true
 
 (* Non-finite floats are not JSON: encode them as {"nonfinite": ...}. *)
 let rec encode_nonfinite (j : Yojson.Safe.t) : Yojson.Safe.t =
@@ -111,6 +124,16 @@ let fork_commit () =
 let hello_builtins : (unit -> Yojson.Safe.t) ref =
   ref Smt.Servpips_functions.hello_json
 
+(* The JS compiler emits the arithmetic extern servpips_arith (E14) in
+   SERVPIPS mode: announced as builtins.servpips_arith (the converter then
+   translates the remaining FPlus/FMinus/FTimes/FDiv of path conditions and
+   values exactly, WP6a). *)
+let with_arith (j : Yojson.Safe.t) : Yojson.Safe.t =
+  match j with
+  | `Assoc l when not (List.mem_assoc "servpips_arith" l) ->
+      `Assoc (l @ [ ("servpips_arith", `String "E14") ])
+  | j -> j
+
 let hello ~unroll () =
   if !enabled_ref then
     let c = config () in
@@ -125,7 +148,7 @@ let hello ~unroll () =
            ("shard", c.shard_json);
            ("unroll", `Int unroll);
            ("smt_timeout_ms", `Int c.smt_timeout_ms);
-           ("builtins", !hello_builtins ());
+           ("builtins", with_arith (!hello_builtins ()));
          ])
 
 let emit_end ~status ~reason ?outcome ~pc ~types () =
@@ -441,3 +464,75 @@ let emit_stats () =
            ("seconds", `Float (Unix.gettimeofday () -. !start_time));
            ("rss_mb", rss_mb ());
          ]))
+
+(* Sampling profiler (diagnostics only; never changes results). *)
+let sampling = ref false
+let sample_hook : (unit -> string) ref = ref (fun () -> "")
+
+let current_rss_mb () =
+  try
+    let ic = open_in "/proc/self/statm" in
+    let r = Scanf.sscanf (input_line ic) "%d %d" (fun _ rss -> rss) in
+    close_in_noerr ic;
+    r * 4096 / 1048576
+  with _ -> -1
+
+let start_sampler () =
+  match Sys.getenv_opt "SERVPIPS_SAMPLE" with
+  | None | Some "" -> ()
+  | Some spec ->
+      let file, ms =
+        match String.rindex_opt spec ':' with
+        | Some i -> (
+            let f = String.sub spec 0 i in
+            let t = String.sub spec (i + 1) (String.length spec - i - 1) in
+            match int_of_string_opt t with
+            | Some ms when ms > 0 -> (f, ms)
+            | _ -> (spec, 10))
+        | None -> (spec, 10)
+      in
+      let oc = open_out file in
+      let n = ref 0 in
+      let t0 = Unix.gettimeofday () in
+      (* SERVPIPS_SAMPLE_OCAML=<depth>: also the OCaml call stack *)
+      let ocaml_depth =
+        match Sys.getenv_opt "SERVPIPS_SAMPLE_OCAML" with
+        | Some d -> Option.value (int_of_string_opt d) ~default:0
+        | None -> 0
+      in
+      let ocaml_stack () =
+        let bt = Printexc.get_callstack ocaml_depth in
+        match Printexc.backtrace_slots bt with
+        | None -> ""
+        | Some slots ->
+            let b = Buffer.create 512 in
+            Array.iteri
+              (fun i slot ->
+                if i > 0 then
+                  match Printexc.Slot.name slot with
+                  | Some nm ->
+                      if Buffer.length b > 0 then Buffer.add_string b " ; ";
+                      Buffer.add_string b nm
+                  | None -> ())
+              slots;
+            Buffer.contents b
+      in
+      sampling := true;
+      Sys.set_signal Sys.sigprof
+        (Sys.Signal_handle
+           (fun _ ->
+             incr n;
+             let line =
+               try !sample_hook () with e -> "exn " ^ Printexc.to_string e
+             in
+             let ost = if ocaml_depth > 0 then ocaml_stack () else "" in
+             Printf.fprintf oc "%d\t%.2f\t%d\t%s\t%s\n" !n
+               (Unix.gettimeofday () -. t0)
+               (current_rss_mb ()) line ost;
+             flush oc));
+      let iv = float_of_int ms /. 1000. in
+      ignore
+        (Unix.setitimer Unix.ITIMER_PROF
+           { Unix.it_interval = iv; Unix.it_value = iv })
+
+let () = start_sampler_ref := start_sampler

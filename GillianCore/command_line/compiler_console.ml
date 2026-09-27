@@ -38,7 +38,43 @@ module Make
           prog (Some path))
       progs.gil_progs
 
-  let compile files mode runtime_path ci tl_opts =
+  (* SERVPIPS: [--servpips] / [--servpips-runtime DIR] compile the program
+     exactly as [wpst --servpips [--servpips-runtime DIR]] runs it (the
+     runtime preamble and the SERVPIPS compilation), so that a compile check
+     sees the same program as the symbolic execution. *)
+  let servpips_compile =
+    let docs = "SERVPIPS OPTIONS" in
+    let enabled =
+      let doc =
+        "Compile as $(b,wpst --servpips) does (SERVPIPS compilation; no event \
+         log)."
+      in
+      Arg.(value & flag & info [ "servpips" ] ~docs ~doc)
+    in
+    let runtime =
+      let doc =
+        "SERVPIPS runtime directory containing the preamble.js used for \
+         CommonJS programs, as for $(b,wpst --servpips-runtime). Implies \
+         $(b,--servpips)."
+      in
+      Arg.(
+        value
+        & opt (some string) None
+        & info [ "servpips-runtime" ] ~docs ~doc ~docv:"DIR")
+    in
+    let f enabled runtime = (enabled, runtime) in
+    Term.(const f $ enabled $ runtime)
+
+  let apply_servpips_compile (enabled, runtime) =
+    match (enabled, runtime) with
+    | false, None -> ()
+    | _, Some d when not (Sys.file_exists d && Sys.is_directory d) ->
+        Fmt.epr "gillian: --servpips-runtime: not a directory: %s@." d;
+        exit 124
+    | _, runtime_dir -> Servpips.enable_compile ~runtime_dir
+
+  let compile files mode runtime_path ci tl_opts sp =
+    let () = apply_servpips_compile sp in
     let () = Config.ci := ci in
     let () = PC.TargetLangOptions.apply tl_opts in
     let () = PC.initialize mode in
@@ -54,7 +90,7 @@ module Make
   let compile_t =
     Term.(
       const compile $ files $ mode $ runtime_path $ ci
-      $ PC.TargetLangOptions.term)
+      $ PC.TargetLangOptions.term $ servpips_compile)
 
   let compile_info =
     let doc = "Compiles a file from the target language to GIL" in

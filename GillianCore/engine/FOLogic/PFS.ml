@@ -15,15 +15,39 @@ module H = Hashtbl.Make (struct
   let hash = Hashtbl.hash
 end)
 
-type t = { lst : Expr.t Ext_list.t; mutable idx : int H.t option }
+(* SERVPIPS (E19): [gen] is a stamp, fresh (globally unique) at creation and
+   at every mutation, and kept by [copy]: two formula sets with the same stamp
+   have the same formulae in the same order (see [generation]). *)
+let stamp_counter = ref 0
+
+let fresh_stamp () =
+  incr stamp_counter;
+  !stamp_counter
+
+type t = {
+  lst : Expr.t Ext_list.t;
+  mutable idx : int H.t option;
+  mutable gen : int;
+  mutable src : Expr.t list option;
+      (** SERVPIPS: the list the formulae were last [set] to, while they have
+          not been modified since (a [set] to an equal list is a no-op) *)
+}
 
 let to_yojson (pfs : t) = Ext_list.to_yojson Expr.to_yojson pfs.lst
 
 let of_yojson j =
-  Result.map (fun lst -> { lst; idx = None }) (Ext_list.of_yojson Expr.of_yojson j)
+  Result.map
+    (fun lst -> { lst; idx = None; gen = fresh_stamp (); src = None })
+    (Ext_list.of_yojson Expr.of_yojson j)
 
-let mk lst = { lst; idx = None }
-let invalidate (pfs : t) = pfs.idx <- None
+let mk lst = { lst; idx = None; gen = fresh_stamp (); src = None }
+let generation (pfs : t) = pfs.gen
+let servpips_set_generation (pfs : t) (g : int) = pfs.gen <- g
+
+let invalidate (pfs : t) =
+  pfs.idx <- None;
+  pfs.gen <- fresh_stamp ();
+  pfs.src <- None
 let init () : t = mk (Ext_list.make ())
 
 let equal (pfs1 : t) (pfs2 : t) : bool =
@@ -55,6 +79,8 @@ let mem (pfs : t) (f : Expr.t) =
 let extend (pfs : t) (a : Expr.t) : unit =
   if not (mem pfs a) then (
     Ext_list.add a pfs.lst;
+    pfs.gen <- fresh_stamp ();
+    pfs.src <- None;
     match pfs.idx with
     | Some h -> H.replace h a (1 + Option.value (H.find_opt h a) ~default:0)
     | None -> ())
@@ -66,7 +92,12 @@ let clear (pfs : t) : unit =
 let length (pfs : t) = Ext_list.length pfs.lst
 
 let copy (pfs : t) : t =
-  { lst = Ext_list.copy pfs.lst; idx = Option.map H.copy pfs.idx }
+  {
+    lst = Ext_list.copy pfs.lst;
+    idx = Option.map H.copy pfs.idx;
+    gen = pfs.gen;
+    src = pfs.src;
+  }
 
 let merge_into_left (pfs_l : t) (pfs_r : t) : unit =
   Ext_list.concat pfs_l.lst pfs_r.lst;
@@ -74,8 +105,16 @@ let merge_into_left (pfs_l : t) (pfs_r : t) : unit =
   invalidate pfs_r
 
 let set (pfs : t) (reset : Expr.t list) : unit =
-  clear pfs;
-  merge_into_left pfs (of_list reset)
+  match pfs.src with
+  | Some l
+    when !Config.servpips_semantics
+         && List.equal (fun a b -> a == b || Expr.equal a b) l reset ->
+      (* SERVPIPS (E19): already exactly these formulae in this order *)
+      ()
+  | _ ->
+      clear pfs;
+      merge_into_left pfs (of_list reset);
+      if !Config.servpips_semantics then pfs.src <- Some reset
 
 let substitution (subst : SESubst.t) (pfs : t) : unit =
   Ext_list.map_inplace (SESubst.subst_in_expr ~partial:true subst) pfs.lst;

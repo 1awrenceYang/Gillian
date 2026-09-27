@@ -159,6 +159,27 @@ let check_entailment
         existentials PFS.pp left_fs PFS.pp (PFS.of_list right_fs) Type_env.pp
         gamma);
 
+  (* SERVPIPS (E19): an entailment whose right-hand side reduces to true on
+     its own (e.g. a concrete property name that is not in a concrete domain,
+     asked by the JS memory model at every property lookup miss) holds without
+     simplifying the whole path condition; [A => true] is valid. *)
+  if
+    !Config.servpips_semantics && (not matching) && SS.is_empty existentials
+    && right_fs <> []
+    && List.for_all
+         (fun f ->
+           (* without context first (cheap: no type inference) *)
+           match Reduction.reduce_lexpr f with
+           | Lit (Bool true) -> true
+           | _ -> (
+               (not (Containers.SS.is_empty (Expr.lvars f)))
+               &&
+               match Reduction.reduce_lexpr ~pfs:left_fs ~gamma f with
+               | Lit (Bool true) -> true
+               | _ -> false))
+         right_fs
+  then true
+  else
   (* SOUNDNESS !!DANGER!!: call to simplify_implication       *)
   (* Simplify maximally the implication to be checked         *)
   (* Remove from the typing environment the unused variables  *)

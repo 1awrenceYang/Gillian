@@ -951,6 +951,9 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
         let>-- args = List.map (fun lit -> simple_wrap (encode_lit lit)) lits in
         let args = List.map (fun arg -> arg.expr) args in
         list args >- ListType
+    | Constant c when !servpips_mode && Literal.servpips_lower_constants lit <> None ->
+        (* SERVPIPS: deterministic constants are numbers *)
+        encode_lit (Literal.evaluate_constant c)
     | Constant _ -> raise (Exceptions.Unsupported "Z3 encoding: constants")
   with Failure msg -> exceptf "DEATH: encode_lit %a. %s" Literal.pp lit msg
 
@@ -1067,7 +1070,9 @@ module Servpips_enc = struct
   let floor x = int_to_real (real_to_int x)
   let ceil x = num_neg (floor (num_neg x))
   let abs x = ite (num_leq zero x) x (num_neg x)
-  let sgn x = ite (num_lt zero x) (rk 1.) (ite (num_lt x zero) (rk (-1.)) zero)
+  (* M_sgn is copysign(1, x) (the JSIL runtime tells -0 from +0 with it);
+     a symbolic zero is +0 (A6: -0 only as a concrete literal) *)
+  let sgn x = ite (num_lt x zero) (rk (-1.)) (rk 1.)
   let round x = floor (num_add x (rk 0.5))
   let trunc x = ite (num_leq zero x) (floor x) (num_neg (floor (num_neg x)))
   let two32 = rk 4294967296.
@@ -1124,9 +1129,37 @@ module Servpips_enc = struct
     | `Native f, xs -> app_ f xs >- spec.ret
 end
 
+(* SERVPIPS: the type guards of the wrapped values that a sub-formula accesses
+   (Encoding.extra_asrts: "N is a string" for ToNumberOp(N) on an untyped N)
+   are asserted at the top level of the query. Under a disjunction, an
+   implication or a negation that makes the query stronger than the formula:
+   in (S <> undefined /\ u = S) \/ u = ToNumberOp(N) the guard of the second
+   disjunct forces N to be a string in every model. In SERVPIPS mode the
+   guards stay inside the operand they come from: (guards /\ operand). *)
+let servpips_guarded (enc : Encoding.t) : Encoding.t =
+  let open Encoding in
+  let b = get_bool enc in
+  match b.extra_asrts with
+  | [] -> b
+  | g :: gs ->
+      let guard = List.fold_left bool_and g gs in
+      { b with expr = bool_and guard b.expr; extra_asrts = [] }
+
 let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
     =
   let open Encoding in
+  match op with
+  | (Or | Impl) when !servpips_mode ->
+      let a = servpips_guarded p1 in
+      let b = servpips_guarded p2 in
+      let e =
+        (match op with
+        | Or -> bool_or a.expr b.expr
+        | _ -> bool_implies a.expr b.expr)
+        >- BooleanType
+      in
+      { e with consts = merge_consts a.consts b.consts }
+  | _ -> (
   let>- _ = p1 in
   let>- _ = p2 in
   (* In the case of strongly typed operations, we do not perform any check.
@@ -1264,11 +1297,18 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | M_atan2
   | M_pow ->
       exceptf "SMT encoding: Costruct not supported yet - binop: %s"
-        (BinOp.str op)
+        (BinOp.str op))
 
 let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   let open Encoding in
   let open Axiomatised_operations in
+  match op with
+  | Not when !servpips_mode ->
+      (* SERVPIPS: see [servpips_guarded] *)
+      let a = servpips_guarded le in
+      let e = bool_not a.expr >- BooleanType in
+      { e with consts = a.consts }
+  | _ -> (
   let>- _ = le in
   match op with
   | IUnaryMinus ->
@@ -1379,7 +1419,7 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
           (UnOp.str op)
       in
       let () = L.print_to_all msg in
-      raise (Failure msg)
+      raise (Failure msg))
 
 let copy_extend_gamma gamma vars =
   (* Start by updating gamma with the information provided by bound / quantifier types.

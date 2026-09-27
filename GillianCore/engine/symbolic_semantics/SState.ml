@@ -205,10 +205,14 @@ module Make (SMemory : SMemory.S) :
     let open Syntaxes.List in
     let { heap; store; pfs; gamma; spec_vars } = state in
     let pc = Gpc.make ~matching:false ~pfs ~gamma () in
-    let+ Gbranch.{ value; pc } = SMemory.execute_action action heap pc args in
+    let results = SMemory.execute_action action heap pc args in
+    (* SERVPIPS (E19): a single result keeps the store (the interpreter uses
+       the state linearly: the old state is not used after the action) *)
+    let single = !Config.servpips_semantics && List.length results = 1 in
+    let+ Gbranch.{ value; pc } = results in
     match value with
     | Ok (new_heap, vs) ->
-        let store = SStore.copy store in
+        let store = if single then store else SStore.copy store in
         let new_state =
           { heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma; spec_vars }
         in
@@ -398,34 +402,59 @@ module Make (SMemory : SMemory.S) :
            -----------------------------------"
           pp state);
     let subst, _ =
-      Simplifications.simplify_pfs_and_gamma ~kill_new_lvars pfs gamma ~matching
+      Simplifications.simplify_pfs_and_gamma ~servpips_memo:true ~kill_new_lvars
+        pfs gamma ~matching
         ~save_spec_vars
     in
-    let subst =
-      SSubst.filter subst (fun x _ ->
-          match x with
-          | LVar x | PVar x | ALoc x -> not (SS.mem x spec_vars)
-          | _ -> true)
+    let keep_binding x =
+      match x with
+      | Expr.LVar x | PVar x | ALoc x -> not (SS.mem x spec_vars)
+      | _ -> true
     in
-    (* Sometimes, [simplify_pfs_and_gamma] leaves abstract locations on the
-       rhs of the subst that should be gone, according to itself.
-       We filter that. *)
-    let subst = SSubst.to_list subst in
-    let loc_subst =
-      subst
-      |> List.filter (fun (x, _) ->
-             match x with
-             | Expr.ALoc _ | Lit (Loc _) -> true
-             | _ -> false)
-      |> SSubst.init
+    let is_loc_key x =
+      match x with
+      | Expr.ALoc _ | Lit (Loc _) -> true
+      | _ -> false
     in
     let subst =
-      List.map
-        (fun (x, y) -> (x, SSubst.subst_in_expr loc_subst ~partial:true y))
-        subst
-      |> SSubst.init
+      if !Config.servpips_semantics then
+        (* SERVPIPS (E19): the same steps on a list, with one table at the
+           end (and none when nothing is left) *)
+        let l =
+          SSubst.fold subst
+            (fun x y acc -> if keep_binding x then (x, y) :: acc else acc)
+            []
+        in
+        let l =
+          match List.filter (fun (x, _) -> is_loc_key x) l with
+          | [] -> l
+          | locs ->
+              let loc_subst = SSubst.init locs in
+              List.map
+                (fun (x, y) ->
+                  (x, SSubst.subst_in_expr loc_subst ~partial:true y))
+                l
+        in
+        match List.filter (fun (x, y) -> not (Expr.equal x y)) l with
+        | [] when SSubst.is_empty subst -> subst
+        | l -> SSubst.init l
+      else
+        let subst = SSubst.filter subst (fun x _ -> keep_binding x) in
+        (* Sometimes, [simplify_pfs_and_gamma] leaves abstract locations on
+           the rhs of the subst that should be gone, according to itself.
+           We filter that. *)
+        let subst = SSubst.to_list subst in
+        let loc_subst =
+          subst |> List.filter (fun (x, _) -> is_loc_key x) |> SSubst.init
+        in
+        let subst =
+          List.map
+            (fun (x, y) -> (x, SSubst.subst_in_expr loc_subst ~partial:true y))
+            subst
+          |> SSubst.init
+        in
+        SSubst.filter subst (fun x y -> not (Expr.equal x y))
     in
-    let subst = SSubst.filter subst (fun x y -> not (Expr.equal x y)) in
     if SSubst.is_empty subst then (
       Logging.verbose (fun fmt ->
           fmt "No simplifications were made, state unchanged.");

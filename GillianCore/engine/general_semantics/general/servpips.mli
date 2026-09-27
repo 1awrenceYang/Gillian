@@ -45,6 +45,12 @@ val config : unit -> config
     file (truncating it). Called by the [wpst] command line. *)
 val enable : config -> unit
 
+(** Turn SERVPIPS mode on for compilation only ([gillian-js compile
+    --servpips [--servpips-runtime DIR]]): the program is compiled exactly as
+    [wpst --servpips [--servpips-runtime DIR]] compiles it (same preamble,
+    same SERVPIPS forms), and no event log is opened ({!emit} does nothing). *)
+val enable_compile : runtime_dir:string option -> unit
+
 (** {2 Output} *)
 
 (** Write one JSON object as one line of the log and flush. No-op unless
@@ -82,7 +88,9 @@ val note :
     [SERVPIPS_FORK_COMMIT], set in the engine image; ["unknown"] otherwise). *)
 val fork_commit : unit -> string
 
-(** Extra [hello] field [builtins] (the SMT-LIB text of builtin definitions):
+(** Extra [hello] field [builtins] (the SMT-LIB text of builtin definitions;
+    [hello] adds ["servpips_arith": "E14"]: the JS compiler emits the
+    arithmetic extern [servpips_arith] in SERVPIPS mode):
     by default [Servpips_functions.hello_json], i.e.
     [{"str.in_re.numlit": "<regex text>"}]. *)
 val hello_builtins : (unit -> Yojson.Safe.t) ref
@@ -239,3 +247,18 @@ val fatal : unit -> string option
       "unknown_assumed_sat":..,"entail_unknown":..,"encode_failures":..},
       "fatal":null|"..","seconds":..,"rss_mb":..}] *)
 val emit_stats : unit -> unit
+
+(** {2 Sampling profiler (diagnostics only)}
+
+    With the environment variable [SERVPIPS_SAMPLE=<file>[:<ms>]] (default
+    10 ms), {!start_sampler} installs a SIGPROF timer; every [<ms>] of CPU
+    time one line [<n> TAB <seconds> TAB <current rss MB> TAB <hook>] is
+    appended to [<file>], where [<hook>] is the result of {!sample_hook}
+    (the interpreter sets it to its current position: procedure, command
+    index, call stack, JS source locations, pending configurations). With
+    [SERVPIPS_SAMPLE_OCAML=<depth>] a fifth column holds the OCaml call stack
+    (innermost first, [" ; "]-separated function names). *)
+
+val sampling : bool ref
+val sample_hook : (unit -> string) ref
+val start_sampler : unit -> unit

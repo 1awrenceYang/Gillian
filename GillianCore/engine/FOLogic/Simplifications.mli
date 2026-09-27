@@ -12,8 +12,13 @@
     variables will be preserved. If the [save_spec_vars] parameter is
     [(var_set, false)], only the spec variables in [var_set] will be preserved.
     The [matching] flag should not be used by Gillian instantiation developers.
+    SERVPIPS (E19): with [~servpips_memo:true] (the symbolic state's
+    simplification) a call on the same, unmodified [lpfs] and [gamma] as the
+    previous fixpoint call returns the same answer without rebuilding the
+    cache key.
 *)
 val simplify_pfs_and_gamma :
+  ?servpips_memo:bool ->
   ?matching:bool ->
   ?kill_new_lvars:bool ->
   ?save_spec_vars:Utils.Containers.SS.t * bool ->

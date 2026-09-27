@@ -1,0 +1,6 @@
+{"ev": "note", "code": "vt", "msg": "min", "site": null, "data": {"vt": {"t": "val", "e": {"pp": "neg_infinity", "ast": ["Lit", ["Num", {"nonfinite": "-Infinity"}]]}}}}
+{"ev": "note", "code": "vt", "msg": "max", "site": null, "data": {"vt": {"t": "val", "e": {"pp": "infinity", "ast": ["Lit", ["Num", {"nonfinite": "Infinity"}]]}}}}
+{"ev": "note", "code": "vt", "msg": "threw", "site": null, "data": {"vt": {"t": "val", "e": {"pp": "true", "ast": ["Lit", ["Bool", true]]}}}}
+{"ev": "note", "code": "vt", "msg": "c", "site": null, "data": {"vt": {"t": "val", "e": {"pp": "\"a\"", "ast": ["Lit", ["String", "a"]]}}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [], "types": []}
+{"ev": "stats", "leaves": 1, "ends": {"returned": 1, "threw": 0, "truncated": 0, "unknown": 0, "unsupported": 0, "error": 0}, "infeasible": 0, "vanished": 0, "max_branch": 0, "fatal": null, "solver": {"unknown_assumed_sat": 0, "entail_unknown": 0, "encode_failures": 0}}

@@ -431,6 +431,55 @@ struct
     let annot, _, cmd = proc.proc_body.(i) in
     (pid, (annot, cmd))
 
+  (* SERVPIPS: position of the interpreter, read by the sampling profiler
+     (Servpips.start_sampler, diagnostics only). *)
+  let sp_prog : annot MP.prog option ref = ref None
+  let sp_cs : Call_stack.t ref = ref []
+  let sp_i = ref 0
+  let sp_b = ref 0
+  let sp_pending : CConf.t list ref = ref []
+  let sp_state : State.t option ref = ref None
+  let sp_nsample = ref 0
+
+  let sp_pc_every =
+    match Sys.getenv_opt "SERVPIPS_SAMPLE_PC" with
+    | Some s -> Option.value (int_of_string_opt s) ~default:0
+    | None -> 0
+
+  let sp_sample () =
+    let b = Buffer.create 256 in
+    incr sp_nsample;
+    Printf.bprintf b "pend=%d b=%d\t" (List.length !sp_pending) !sp_b;
+    (if sp_pc_every > 0 && !sp_nsample mod sp_pc_every = 0 then
+       match !sp_state with
+       | Some st ->
+           let pc, _ = try State.servpips_pc st with _ -> ([], []) in
+           Printf.bprintf b "PC[%s] "
+             (String.concat " /\\ " (List.map (Fmt.to_to_string Expr.pp) pc))
+       | None -> ());
+    let rec go depth i = function
+      | [] -> ()
+      | _ when depth >= 60 -> Buffer.add_string b " < ..."
+      | (el : Call_stack.stack_element) :: rest ->
+          if depth > 0 then Buffer.add_string b " < ";
+          Printf.bprintf b "%s:%d" el.pid i;
+          (match !sp_prog with
+          | Some prog -> (
+              match Prog.get_proc prog.prog el.pid with
+              | Some proc when i >= 0 && i < Array.length proc.proc_body -> (
+                  let annot, _, _ = proc.proc_body.(i) in
+                  match Annot.get_origin_loc annot with
+                  | Some loc ->
+                      Printf.bprintf b "@%s:%d:%d" loc.loc_source
+                        loc.loc_start.pos_line loc.loc_start.pos_column
+                  | None -> ())
+              | _ -> ())
+          | None -> ());
+          go (depth + 1) el.call_index rest
+    in
+    go 0 !sp_i !sp_cs;
+    Buffer.contents b
+
   let get_predecessor
       (prog : annot MP.prog)
       (cs : Call_stack.t)
@@ -1348,7 +1397,41 @@ struct
            when the guard mentions logical variables. Must be called before
            [state] is modified by [State.assume]. *)
         let servpips_prune ~kept ~by =
-          if Servpips.enabled () then
+          (* SERVPIPS (E19): most guards decided by reduction mention no
+             logical variable, neither directly nor through the store: that
+             is checked first, without building the substituted guard *)
+          let rec has_lvar (e : Expr.t) =
+            match e with
+            | LVar _ -> true
+            | Lit _ | PVar _ | ALoc _ -> false
+            | UnOp (_, e) -> has_lvar e
+            | BinOp (a, _, b) -> has_lvar a || has_lvar b
+            | LstSub (a, b, c) -> has_lvar a || has_lvar b || has_lvar c
+            | NOp (_, l) | EList l | ESet l | ConstructorApp (_, l) | FuncApp (_, l)
+              -> List.exists has_lvar l
+            | Exists _ | ForAll _ | Cases _ ->
+                not (SS.is_empty (Expr.lvars e))
+          in
+          let rec guard_has_lvar (e : Expr.t) =
+            match e with
+            | PVar x -> (
+                match Store.get (State.get_store state) x with
+                | Some v -> has_lvar (Val.to_expr v)
+                | None -> false)
+            | LVar _ -> true
+            | Lit _ | ALoc _ -> false
+            | UnOp (_, e) -> guard_has_lvar e
+            | BinOp (a, _, b) -> guard_has_lvar a || guard_has_lvar b
+            | LstSub (a, b, c) ->
+                guard_has_lvar a || guard_has_lvar b || guard_has_lvar c
+            | NOp (_, l) | EList l | ESet l | ConstructorApp (_, l) | FuncApp (_, l)
+              -> List.exists guard_has_lvar l
+            | Exists _ | ForAll _ | Cases _ -> true
+          in
+          if
+            Servpips.enabled ()
+            && (has_lvar (Val.to_expr vt) || guard_has_lvar e)
+          then
             let guard_orig =
               (* substitute only the program variables of the guard *)
               let store = State.get_store state in
@@ -2320,6 +2403,14 @@ struct
           cconf
         in
         L.set_previous prev_cmd_report_id;
+        if !Servpips.sampling then (
+          sp_prog := Some prog;
+          sp_cs := cs;
+          sp_i := i;
+          sp_b := b_counter;
+          sp_pending := rest_confs;
+          if sp_pc_every > 0 then sp_state := Some state;
+          Servpips.sample_hook := sp_sample);
         let next_confs =
           protected_evaluate_cmd prog state cs iframes prev prev_loop_ids i
             b_counter loc parent_id_ref branch_path branch_case laction_fuel
@@ -2375,7 +2466,7 @@ struct
         if Servpips.enabled () && not !Config.debug then (
           (* SERVPIPS (E1): stream the end event and drop the final state *)
           let reason =
-            Fmt.str "%s:%d: @[<h>%a@]" proc proc_idx
+            Fmt.str "%s: @[<h>%a@]" proc
               (Fmt.list ~sep:(Fmt.any "; ") pp_err_t)
               errors
           in

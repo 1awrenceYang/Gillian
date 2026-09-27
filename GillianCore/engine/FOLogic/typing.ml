@@ -8,6 +8,27 @@ exception Break
 (* ** TYPE INFERENCE ** *)
 (* ******************** *)
 
+(* SERVPIPS: typing an expression infers the types its sub-terms need and,
+   upstream, adds them to the type environment, which then acts as a fact of
+   the path (reduction decides typeOf tests with it, the SMT encoding picks
+   sorts with it). That encodes "this evaluation does not fail", which holds
+   for the well-typed JSIL runtime, but not for terms that the SERVPIPS models
+   build as data (formulas to assume, value-level conditionals): e.g. from
+   (S <> undefined /\ u = S) \/ u = ToNumberOp(N) upstream Gillian infers
+   N : Str, and so drops the executions where only S is present. In SERVPIPS
+   mode:
+   - [type_lexpr] never adds inferred types to the environment (types come
+     from asserted facts: typeOf facts and typed equalities of the path
+     condition, via the simplification, and declared types);
+   - reverse typing ([reverse_type_lexpr], whose result some callers add to
+     the environment) infers nothing from the sub-terms of a disjunction, an
+     implication, a negation or a value-level conditional ([ite.*]). *)
+let servpips_local (te : Type_env.t) : Type_env.t =
+  if !Config.servpips_semantics then Type_env.copy te else te
+
+let servpips_conditional_app (n : string) : bool =
+  !Config.servpips_semantics && String.length n > 4 && String.sub n 0 4 = "ite."
+
 module Infer_types_to_gamma = struct
   open Type
 
@@ -18,9 +39,10 @@ module Infer_types_to_gamma = struct
       (op : UnOp.t)
       (le : Expr.t)
       (tt : Type.t) =
+    let f_local le t = f flag gamma (servpips_local new_gamma) le t in
     let f = f flag gamma new_gamma in
     match op with
-    | Not -> tt = BooleanType && f le BooleanType
+    | Not -> tt = BooleanType && f_local le BooleanType
     | IsInt | M_isNaN -> tt = BooleanType && f le NumberType
     | IUnaryMinus -> tt = IntType && f le IntType
     | FUnaryMinus
@@ -63,6 +85,7 @@ module Infer_types_to_gamma = struct
       (le1 : Expr.t)
       (le2 : Expr.t)
       (tt : Type.t) =
+    let f_local le t = f flag gamma (servpips_local new_gamma) le t in
     let f = f flag gamma new_gamma in
     let (rqt1 : Type.t option), (rqt2 : Type.t option), (rt : Type.t option) =
       match op with
@@ -110,6 +133,11 @@ module Infer_types_to_gamma = struct
       | UnsignedRightShiftF
       | M_atan2
       | M_pow -> (Some NumberType, Some NumberType, Some NumberType)
+    in
+    let f =
+      match op with
+      | Or | Impl -> f_local
+      | _ -> f
     in
     Option.fold ~some:(fun t -> f le1 t) ~none:true rqt1
     && Option.fold ~some:(fun t -> f le2 t) ~none:true rqt2
@@ -170,6 +198,11 @@ module Infer_types_to_gamma = struct
         (* SERVPIPS builtin: known argument and result types *)
         match Smt.Servpips_functions.lookup n with
         | Some spec ->
+            let f =
+              if servpips_conditional_app n then
+                f' gamma (servpips_local new_gamma)
+              else f
+            in
             tt = spec.ret
             && List_utils.lengths_eq spec.args les
             && List.for_all2 f les spec.args
@@ -343,7 +376,8 @@ module Type_lexpr = struct
     let outcome = reverse_type_lexpr true gamma [ (le, tt) ] in
     Option.fold
       ~some:(fun new_gamma ->
-        Type_env.extend gamma new_gamma;
+        (* SERVPIPS: see [servpips_local] *)
+        if not !Config.servpips_semantics then Type_env.extend gamma new_gamma;
         (Some tt, true))
       ~none:def_neg outcome
 

@@ -375,6 +375,10 @@ let rec get_length_of_string (str : Expr.t) : int option =
   | BinOp (sl, StrCat, sr) ->
       Option.value ~default:None
         (Option.map (fun ll -> Option.map (( + ) ll) (f sr)) (f sl))
+  (* SERVPIPS: any other string expression (builtin applications such as
+     decodeURIComponent(..), num_to_string x, js.tostring(v), ...) has an
+     unknown length here (its SMT encoding is str.len of the term) *)
+  | _ when !Config.servpips_semantics -> None
   | _ ->
       Fmt.failwith "get_length_of_string: string equals %a, impossible" Expr.pp
         str
@@ -406,6 +410,7 @@ let rec get_nth_of_string (str : Expr.t) (idx : int) : Expr.t option =
         Option.bind (get_length_of_string ls) (fun llen ->
             let lst, idx = if idx < llen then (ls, idx) else (rs, idx - llen) in
             f lst idx)
+    | _ when !Config.servpips_semantics -> None
     | _ ->
         Fmt.failwith "get_nth_of_string: string equals %a, impossible" Expr.pp
           str
@@ -419,6 +424,14 @@ let rec get_nth_of_string (str : Expr.t) (idx : int) : Expr.t option =
 (* ------------------------------------------------------------------ *)
 (* SERVPIPS (E7): IEEE semantics of atoms with non-finite literals      *)
 (* ------------------------------------------------------------------ *)
+
+(* SERVPIPS: [servpips_input_not_loc x l] holds when the logical variable [x]
+   denotes an input value whose object identity (if it is an object) can only
+   be one of the locations the target language allocates for it, and [l] is
+   not one of them; then [x == l] is false. Installed by the target language
+   (Gillian-JS: LazyJSON inputs never alias a program object). *)
+let servpips_input_not_loc : (string -> string -> bool) ref =
+  ref (fun _ _ -> false)
 
 let rec servpips_lit_nonfinite (l : Literal.t) =
   match l with
@@ -1009,6 +1022,12 @@ and reduce_lexpr_loop
     (* -------------------------
               Base cases
        ------------------------- *)
+    (* SERVPIPS: deterministic GIL constants ($$max_value, $$epsilon, $$pi,
+       ...) are numbers (upstream they reached no symbolic component) *)
+    | Lit l when !Config.servpips_semantics -> (
+        match Literal.servpips_lower_constants l with
+        | Some l -> Lit l
+        | None -> le)
     | Lit _ | PVar _ | ALoc _ -> le
     (* -------------------------
                  LVar
@@ -1787,6 +1806,10 @@ and reduce_lexpr_loop
     | BinOp (UnOp (ToStringOp, e1), Equal, UnOp (ToStringOp, e2)) ->
         BinOp (e1, Equal, e2)
     (* BinOps: Equalities (locations) *)
+    | BinOp (LVar x, Equal, (ALoc l | Lit (Loc l)))
+    | BinOp ((ALoc l | Lit (Loc l)), Equal, LVar x)
+      when !Config.servpips_semantics && !servpips_input_not_loc x l ->
+        Expr.false_
     (* This line is the central mechanism to "matching": *)
     | BinOp (ALoc x, Equal, ALoc y) when not matching -> Lit (Bool (x = y))
     | BinOp (ALoc _, Equal, Lit (Loc _)) | BinOp (Lit (Loc _), Equal, ALoc _) ->
@@ -2135,7 +2158,10 @@ and reduce_lexpr_loop
         let fidx = f idx in
         match fidx with
         (* Index is a non-negative integer *)
-        | Lit (Num n) when Arith_utils.is_int n && 0. <= n -> (
+        | Lit (Num n)
+          when (Arith_utils.is_int n
+               || (!Config.servpips_semantics && n = 0.) (* SERVPIPS: -0 *))
+               && 0. <= n -> (
             match lexpr_is_string gamma fle with
             | true ->
                 Option.value
@@ -2222,10 +2248,22 @@ and reduce_lexpr_loop
         let open Syntaxes.Option in
         (* If we're reducing A || B or A && B and either side have a reduction exception, it must be false *)
         let flel, fler, exn =
-          try (f lel, f ler, false) with
-          | ReductionException _ when op = Or || op = And ->
-              (Expr.false_, Expr.false_, true)
-          | exn -> raise exn
+          if op = Or && !Config.servpips_semantics then
+            (* SERVPIPS: a disjunct whose reduction fails (e.g. ToNumberOp of
+               undefined after a substitution) is false; the other disjunct
+               stays (upstream: the whole disjunction became false, dropping
+               the executions that satisfy the other disjunct) *)
+            let try_f e = try Some (f e) with ReductionException _ -> None in
+            match (try_f lel, try_f ler) with
+            | Some a, Some b -> (a, b, false)
+            | Some a, None -> (a, Expr.false_, false)
+            | None, Some b -> (Expr.false_, b, false)
+            | None, None -> (Expr.false_, Expr.false_, true)
+          else
+            try (f lel, f ler, false) with
+            | ReductionException _ when op = Or || op = And ->
+                (Expr.false_, Expr.false_, true)
+            | exn -> raise exn
         in
         let- () = if exn then Some Expr.false_ else None in
         let def = Expr.BinOp (flel, op, fler) in
@@ -2367,6 +2405,20 @@ and reduce_lexpr_loop
                 else if PFS.mem pfs flel then fler
                 else if PFS.mem pfs fler then flel
                 else BinOp (flel, And, fler))
+        (* SERVPIPS: a disjunct that is not typable under gamma (a sound
+           fact of the path) is false, e.g. u = ToNumberOp(n) once n is
+           known to be a number; upstream the whole disjunction was
+           untypable (exception: the configuration and its siblings ended
+           with an error) *)
+        | Or
+          when !Config.servpips_semantics
+               && not (snd (Typing.type_lexpr gamma def)) -> (
+            let ok e = snd (Typing.type_lexpr gamma e) in
+            match (ok flel, ok fler) with
+            | true, false -> flel
+            | false, true -> fler
+            | false, false -> Expr.false_
+            | true, true -> def)
         | Or when lexpr_is_bool gamma def -> (
             match (flel, fler) with
             (* 1 is the neutral *)

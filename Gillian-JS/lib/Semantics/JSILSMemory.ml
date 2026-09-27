@@ -229,6 +229,17 @@ module M = struct
         SHeap.set_fv_pair heap loc_name prop v;
         Ok [ (heap, [], new_pfs, []) ])
 
+  (* SERVPIPS (E13): a branch of a memory action dropped because its
+     condition [f] is unsatisfiable with the path condition is reported as a
+     prune event (dropped side: [f]), as for the interpreter's branches *)
+  let servpips_memory_prune pfs gamma (f : Expr.t) =
+    if Gillian.General.Servpips.enabled ()
+       && not (Containers.SS.is_empty (Expr.lvars f))
+    then
+      Gillian.General.Servpips.record_prune ~guard:f ~guard_orig:f
+        ~kept:"else" ~by:"solver" ~pc:(PFS.to_list pfs)
+        ~types:(Type_env.to_list_expr gamma) ()
+
   let get_cell_core
       (heap : t)
       (pfs : PFS.t)
@@ -309,16 +320,36 @@ module M = struct
                   let a_set_inclusion : Expr.t =
                     UnOp (Not, BinOp (prop, SetMem, dom))
                   in
+                  (* SERVPIPS (E19): a literal name and a domain of literals
+                     (every property lookup miss on a concrete object, e.g.
+                     along the prototype chain): decide the membership
+                     directly instead of through the solver interface, and
+                     reduce the new domain without context (it is literal) *)
+                  let literal_miss =
+                    !Gillian.Utils.Config.servpips_semantics
+                    &&
+                    match (prop, dom) with
+                    | Lit p, ESet es ->
+                        List.for_all
+                          (function
+                            | Expr.Lit l -> not (Literal.equal l p)
+                            | _ -> false)
+                          es
+                    | _ -> false
+                  in
                   if
-                    FOSolver.check_entailment Containers.SS.empty pfs
-                      [ a_set_inclusion ] gamma
+                    literal_miss
+                    || FOSolver.check_entailment Containers.SS.empty pfs
+                         [ a_set_inclusion ] gamma
                   then (
                     let new_domain : Expr.t =
                       NOp (SetUnion, [ dom; ESet [ prop ] ])
                     in
                     let new_domain =
-                      Reduction.reduce_lexpr ?gamma:(Some gamma) ?pfs:(Some pfs)
-                        new_domain
+                      if literal_miss then Reduction.reduce_lexpr new_domain
+                      else
+                        Reduction.reduce_lexpr ?gamma:(Some gamma)
+                          ?pfs:(Some pfs) new_domain
                     in
                     let fv_list' = SFVL.add prop (Lit Nono) fv_list in
                     SHeap.set heap loc_name fv_list' (Some new_domain) mtdt;
@@ -343,7 +374,9 @@ module M = struct
                                 (new_f :: PFS.to_list pfs) gamma
                             in
                             match sat with
-                            | false -> None
+                            | false ->
+                                servpips_memory_prune pfs gamma new_f;
+                                None
                             | true ->
                                 (* Cases in which the prop exists *)
                                 let heap' = SHeap.copy heap in
@@ -370,7 +403,9 @@ module M = struct
                       in
                       let dom_ret =
                         match sat with
-                        | false -> []
+                        | false ->
+                            servpips_memory_prune pfs gamma new_f;
+                            []
                         | true ->
                             [ (heap, [ loc; prop; Lit Nono ], [ new_f ], []) ]
                       in
@@ -967,3 +1002,21 @@ module M = struct
     let sorted_locs = Containers.SS.elements (SHeap.domain smemory) in
     List.map (fun loc -> (loc, Option.get (SHeap.get smemory loc))) sorted_locs
 end
+
+(* SERVPIPS: a LazyJSON input value never aliases a program object. Its object
+   identity, if it is an object, is one of the locations allocated for its
+   classes at materialisation (ServpipsLazy.mat_aloc: fresh, once per (value,
+   class)); so [x == l] is false for a registered input [x] and any location
+   [l] that is not one of those. Without this, the equality with an existing
+   object is satisfiable and explores an infeasible aliasing branch (e.g. the
+   regenerator runtime compares every awaited value with its sentinel object;
+   on the aliasing branch its loop never terminates). *)
+let () =
+  Reduction.servpips_input_not_loc :=
+    fun x l ->
+      match ServpipsLazy.find x with
+      | None -> false
+      | Some _ -> (
+          match ServpipsLazy.owner_of_aloc l with
+          | Some (owner, _) -> owner <> x
+          | None -> true)

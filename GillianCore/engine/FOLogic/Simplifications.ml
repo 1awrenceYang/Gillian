@@ -16,6 +16,10 @@ type simpl_val_type = {
   simpl_pfs : Expr.t list;
   simpl_existentials : SS.t;
   subst : SVal.SESubst.t;
+  mutable servpips_post : (int * int * (Var.t * Type.t) list) option;
+      (** SERVPIPS (E19): stamps of the formula set and environment that a
+          cache hit on this entry leaves, with the environment's binding list
+          (see [servpips_hit]) *)
 }
 
 (* Simplification cache *)
@@ -49,10 +53,164 @@ let simplification_cache_find key =
     Servpips_key_tbl.find_opt servpips_simplification_cache key
   else Hashtbl.find_opt simplification_cache key
 
+(* SERVPIPS (E19): the cache keeps every simplified path condition of every
+   path (keys, answers and the formulae they retain): ~4.5 MB per path of the
+   m2 probe, so a long shard (L=2, >1500 paths) reached the 8 GB container
+   limit. In SERVPIPS mode it is emptied when it reaches
+   SERVPIPS_SIMPL_CACHE entries (default 20000), together with the memos that
+   refer to its entries. A later miss recomputes the simplification: the
+   answer is equivalent (the cache is a memo), though not always identical in
+   form (upstream, a hit returns the answer before the ALoc-transitivity step
+   of the miss path). Runs below the bound are unaffected. *)
+let servpips_cache_max =
+  match Sys.getenv_opt "SERVPIPS_SIMPL_CACHE" with
+  | Some s -> ( match int_of_string_opt s with Some n when n > 0 -> n | _ -> 20000)
+  | None -> 20000
+
+let servpips_cache_resets : (unit -> unit) list ref = ref []
+
 let simplification_cache_add key v =
-  if !Config.servpips_semantics then
-    Servpips_key_tbl.replace servpips_simplification_cache key v
+  if !Config.servpips_semantics then (
+    if Servpips_key_tbl.length servpips_simplification_cache >= servpips_cache_max
+    then (
+      Servpips_key_tbl.reset servpips_simplification_cache;
+      List.iter (fun f -> f ()) !servpips_cache_resets);
+    Servpips_key_tbl.replace servpips_simplification_cache key v)
   else Hashtbl.replace simplification_cache key v
+
+(* SERVPIPS (E19): the symbolic state is simplified before every memory
+   action, usually with the path condition and the type environment unchanged
+   since the previous time. When a call was answered by the cache for key [k]
+   and left the formulae and the environment exactly as [k] (a fixpoint, list
+   order included), every later call on the same, unmodified objects
+   (generations unchanged) builds the same key [k] and gets the same cached
+   answer; [servpips_memo] returns that answer without building and hashing
+   the key. "Unmodified" is decided by the stamps of the formula set and the
+   environment ([PFS.generation], [Type_env.generation]: fresh at every
+   mutation, kept by copies, so equal stamps mean equal contents in the same
+   order). Only for calls without [rpfs] and [existentials]. *)
+type servpips_memo = {
+  m_pgen : int;
+  m_ggen : int;
+  m_kill : bool option;
+  m_matching : bool;
+  m_save : (SS.t * bool) option;
+  m_value : simpl_val_type;
+}
+
+let servpips_memo_slot : servpips_memo option ref = ref None
+
+let servpips_memo_find ~kill_new_lvars ~matching ~save_spec_vars lpfs gamma =
+  match !servpips_memo_slot with
+  | Some m
+    when PFS.generation lpfs = m.m_pgen
+         && Type_env.generation gamma = m.m_ggen
+         && m.m_kill = kill_new_lvars && m.m_matching = matching
+         && Option.equal
+              (fun (a, b) (c, d) -> SS.equal a c && b = d)
+              m.m_save save_spec_vars -> Some m.m_value
+  | _ -> None
+
+let servpips_same_lists (k : simpl_key_type) pfs gamma =
+  List.equal (fun a b -> a == b || Expr.equal a b) k.pfs_list pfs
+  && List.equal (fun a b -> a == b || a = b) k.gamma_list gamma
+
+(* SERVPIPS (E19): cache hits that are not fixpoints. The simplification of
+   some path conditions alternates between two orders of the same formulae
+   (k -> k' -> k -> ...), so the fixpoint memo never applies and every call
+   builds and hashes its key. A cache hit on entry [e] sets the formulae and
+   the environment to e's lists; the resulting objects get stamps owned by
+   [e] (e.servpips_post; the environment's iteration order is checked, since
+   it depends on the table), so equal stamps still mean equal contents in the
+   same order. [servpips_stamp_memo] maps the stamps a state had when a call
+   was answered by the cache to the entry that answered it: a later call with
+   the same stamps builds the same key, and gets the same entry, which is
+   applied directly. *)
+let servpips_stamp_memo :
+    (int * int, bool option * bool * (SS.t * bool) option * simpl_val_type)
+    Hashtbl.t =
+  Hashtbl.create 1024
+
+let same_save a b = Option.equal (fun (a, b) (c, d) -> SS.equal a c && b = d) a b
+
+let () =
+  servpips_cache_resets :=
+    (fun () ->
+      Hashtbl.reset servpips_stamp_memo;
+      servpips_memo_slot := None)
+    :: !servpips_cache_resets
+
+(** The effect of a cache hit on entry [cached] (upstream), then the SERVPIPS
+    stamps and memos. [key] is the key when it was built. *)
+let servpips_hit
+    ~memo_ok
+    ~kill_new_lvars
+    ~matching
+    ~save_spec_vars
+    ~(pre : int * int)
+    ?(key : simpl_key_type option)
+    (cached : simpl_val_type)
+    (lpfs : PFS.t)
+    (rpfs : PFS.t)
+    (gamma : Type_env.t) : SESubst.t * SS.t =
+  let { simpl_gamma; simpl_pfs; simpl_existentials; subst; _ } = cached in
+  Type_env.reset gamma simpl_gamma;
+  PFS.set lpfs simpl_pfs;
+  (* Deal with rpfs *)
+  if PFS.length lpfs > 0 && PFS.get_nth 0 lpfs == Some Expr.false_ then (
+    PFS.clear rpfs;
+    PFS.extend rpfs Expr.true_);
+  (if memo_ok then
+     let glist =
+       match cached.servpips_post with
+       | None -> Type_env.to_list gamma
+       | Some (pp, pg, gl) ->
+           if Type_env.generation gamma = pg then (
+             (* the environment already carries e's stamp (its reset was a
+                no-op): its bindings are gl, in gl's order *)
+             PFS.servpips_set_generation lpfs pp;
+             gl)
+           else
+             let glist = Type_env.to_list gamma in
+             if List.equal (fun a b -> a == b || a = b) gl glist then (
+               PFS.servpips_set_generation lpfs pp;
+               Type_env.servpips_set_generation gamma pg);
+             glist
+     in
+     (match cached.servpips_post with
+     | None ->
+         let pp = PFS.fresh_stamp () and pg = Type_env.fresh_stamp () in
+         cached.servpips_post <- Some (pp, pg, glist);
+         PFS.servpips_set_generation lpfs pp;
+         Type_env.servpips_set_generation gamma pg
+     | Some _ -> ());
+     if Hashtbl.length servpips_stamp_memo > 1_000_000 then
+       Hashtbl.reset servpips_stamp_memo;
+     Hashtbl.replace servpips_stamp_memo pre
+       (kill_new_lvars, matching, save_spec_vars, cached);
+     (* fixpoint: the next call on these objects builds the same key *)
+     let fixpoint =
+       match key with
+       | Some key ->
+           servpips_same_lists key simpl_pfs simpl_gamma
+           && servpips_same_lists key simpl_pfs glist
+       | None ->
+           (* applied from the stamp memo: the state is unchanged iff it got
+              back the stamps it had *)
+           (PFS.generation lpfs, Type_env.generation gamma) = pre
+     in
+     if fixpoint then
+       servpips_memo_slot :=
+         Some
+           {
+             m_pgen = PFS.generation lpfs;
+             m_ggen = Type_env.generation gamma;
+             m_kill = kill_new_lvars;
+             m_matching = matching;
+             m_save = save_spec_vars;
+             m_value = cached;
+           });
+  (SESubst.copy subst, simpl_existentials)
 
 (* Reduction of assertions *)
 
@@ -336,6 +494,7 @@ let _resolve_set_existentials
     @param vars_to_save Logical variables that cannot be deleted
     @return Substitution from logical variables to logical expressions *)
 let simplify_pfs_and_gamma
+    ?(servpips_memo = false)
     ?(matching = false)
     ?(kill_new_lvars : bool option)
     ?(save_spec_vars : (SS.t * bool) option)
@@ -344,6 +503,27 @@ let simplify_pfs_and_gamma
     ?(rpfs : PFS.t option)
     (gamma : Type_env.t) : SESubst.t * SS.t =
   (* let t = Unix.gettimeofday () in *)
+  let servpips_memo_ok =
+    servpips_memo && !Config.servpips_semantics && Option.is_none rpfs
+    && Option.is_none existentials
+  in
+  let pre = (PFS.generation lpfs, Type_env.generation gamma) in
+  match
+    if servpips_memo_ok then
+      servpips_memo_find ~kill_new_lvars ~matching ~save_spec_vars lpfs gamma
+    else None
+  with
+  | Some { subst; simpl_existentials; _ } ->
+      (SESubst.copy subst, simpl_existentials)
+  | None -> (
+  match
+    if servpips_memo_ok then Hashtbl.find_opt servpips_stamp_memo pre else None
+  with
+  | Some (k, m, sv, cached)
+    when k = kill_new_lvars && m = matching && same_save sv save_spec_vars ->
+      servpips_hit ~memo_ok:true ~kill_new_lvars ~matching ~save_spec_vars ~pre
+        cached lpfs (PFS.init ()) gamma
+  | _ -> (
   let rpfs : PFS.t = Option.value ~default:(PFS.init ()) rpfs in
   let existentials : SS.t ref =
     ref (Option.value ~default:SS.empty existentials)
@@ -360,17 +540,10 @@ let simplify_pfs_and_gamma
     }
   in
   match simplification_cache_find key with
-  | Some { simpl_gamma; simpl_pfs; simpl_existentials; subst } ->
+  | Some cached ->
       (* update_statistics "Simpl: cached" 0.; *)
-      Type_env.reset gamma simpl_gamma;
-      PFS.set lpfs simpl_pfs;
-
-      (* Deal with rpfs *)
-      if PFS.length lpfs > 0 && PFS.get_nth 0 lpfs == Some Expr.false_ then (
-        PFS.clear rpfs;
-        PFS.extend rpfs Expr.true_);
-
-      (SESubst.copy subst, simpl_existentials)
+      servpips_hit ~memo_ok:servpips_memo_ok ~kill_new_lvars ~matching
+        ~save_spec_vars ~pre ~key cached lpfs rpfs gamma
   | None ->
       L.verbose (fun m -> m "PFS/Gamma simplification:");
       L.verbose (fun m ->
@@ -959,6 +1132,7 @@ let simplify_pfs_and_gamma
           simpl_pfs = PFS.to_list lpfs;
           simpl_existentials = !existentials;
           subst = SESubst.copy result;
+          servpips_post = None;
         }
       in
       simplification_cache_add key cached_simplification;
@@ -992,7 +1166,7 @@ let simplify_pfs_and_gamma
       in
 
       (* Step 6 - Conclude *)
-      (result, !existentials)
+      (result, !existentials)))
 
 let simplify_implication
     ~matching

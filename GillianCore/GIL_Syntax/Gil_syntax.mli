@@ -111,6 +111,11 @@ module Literal : sig
   (** Evaluates a constant *)
   val evaluate_constant : Constant.t -> t
 
+  (** SERVPIPS: the literal with its deterministic constants (Min_float,
+      Max_float, MaxSafeInteger, Epsilon, Pi; also inside literal lists)
+      replaced by their values, [None] when it has none. *)
+  val servpips_lower_constants : t -> t option
+
   (** Builds a GIL list from an OCaml list *)
   val from_list : t list -> t
 
