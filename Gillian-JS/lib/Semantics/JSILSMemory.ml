@@ -130,6 +130,65 @@ module M = struct
         let al = ALoc.alloc () in
         (al, ALoc al, [])
 
+  (* ---------------------------------------------------------------------- *)
+  (* SERVPIPS LazyJSON (E2): materialisation of lazy input values on their  *)
+  (* first memory action. Inactive (a single table test) unless a lazy      *)
+  (* value was registered (__servpips_lazy, SERVPIPS mode only).            *)
+  (* ---------------------------------------------------------------------- *)
+
+  module SL = ServpipsLazy
+
+  let sp_ms heap pfs gamma : SL.mstate = { SL.heap; pfs; gamma }
+
+  (** Run [k] on the location [loc], materialising it first (one run per
+      class branch) when it is an unresolved registered lazy value. *)
+  let with_lazy_loc
+      (heap : t)
+      (pfs : PFS.t)
+      (gamma : Type_env.t)
+      (loc : vt)
+      (k : t -> PFS.t -> Type_env.t -> vt -> action_ret) : action_ret =
+    if not (SL.active ()) then k heap pfs gamma loc
+    else
+      match SL.materialize_loc (sp_ms heap pfs gamma) loc with
+      | None -> k heap pfs gamma loc
+      | Some branches -> (
+          let results =
+            List.map
+              (fun (heap', facts, types, al) ->
+                let pfs' = PFS.copy pfs in
+                List.iter (PFS.extend pfs') facts;
+                let gamma' = Type_env.copy gamma in
+                List.iter (fun (x, t) -> Type_env.update gamma' x t) types;
+                match k heap' pfs' gamma' (Expr.ALoc al) with
+                | Ok rets ->
+                    Ok
+                      (List.map
+                         (fun (h, vs, f, ty) -> (h, vs, facts @ f, types @ ty))
+                         rets)
+                | Error e -> Error e)
+              branches
+          in
+          let oks = List.filter_map Result.to_option results in
+          let errs =
+            List.filter_map
+              (function
+                | Error e -> Some e
+                | Ok _ -> None)
+              results
+          in
+          match (oks, errs) with
+          | _, [] -> Ok (List.concat oks)
+          | [], _ -> Error (List.concat errs)
+          | _ ->
+              raise
+                (Gillian.General.Servpips.Path_end
+                   {
+                     status = "error";
+                     reason =
+                       "SERVPIPS: memory action failed on some lazy class                         branches only";
+                   }))
+
   let alloc
       (heap : t)
       (pfs : PFS.t)
@@ -163,11 +222,14 @@ module M = struct
       (loc : vt)
       (prop : vt)
       (v : vt) : action_ret =
-    let loc_name, _, new_pfs = fresh_loc ~loc pfs gamma in
-    SHeap.set_fv_pair heap loc_name prop v;
-    Ok [ (heap, [], new_pfs, []) ]
+    with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+        let loc_name, _, new_pfs = fresh_loc ~loc pfs gamma in
+        if SL.active () then
+          SL.before_set_cell (sp_ms heap pfs gamma) loc_name prop v;
+        SHeap.set_fv_pair heap loc_name prop v;
+        Ok [ (heap, [], new_pfs, []) ])
 
-  let get_cell
+  let get_cell_core
       (heap : t)
       (pfs : PFS.t)
       (gamma : Type_env.t)
@@ -223,6 +285,13 @@ module M = struct
           match SFVL.get prop fv_list with
           | Some ffv -> Ok [ (heap, [ loc; prop; ffv ], [], []) ]
           | None -> (
+              match
+                if SL.active () then
+                  SL.get_cell_miss (sp_ms heap pfs gamma) loc_name prop
+                else None
+              with
+              | Some rets -> Ok rets
+              | None -> (
               match
                 ( dom,
                   SFVL.get_first
@@ -311,7 +380,7 @@ module M = struct
                         [
                           make_gc_error loc_name prop (SFVL.field_names fv_list)
                             (Some dom);
-                        ]))
+                        ])))
         ~none:(Error [ ([], [ [ FLoc loc; FCell (loc, prop) ] ], Expr.false_) ])
         (SHeap.get heap loc_name)
     in
@@ -323,22 +392,34 @@ module M = struct
     in
     result
 
+  let get_cell
+      (heap : t)
+      (pfs : PFS.t)
+      (gamma : Type_env.t)
+      (loc : vt)
+      (prop : vt) : action_ret =
+    with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+        get_cell_core heap pfs gamma loc prop)
+
   let remove_cell
       (heap : t)
       (pfs : PFS.t)
       (gamma : Type_env.t)
       (loc : vt)
       (prop : vt) : action_ret =
-    let heap = SHeap.copy heap in
-    let f (loc_name : string) : unit =
-      Option.fold
-        ~some:(fun ((fv_list, dom), mtdt) ->
-          SHeap.set heap loc_name (SFVL.remove prop fv_list) dom mtdt;
-          ())
-        ~none:() (SHeap.get heap loc_name)
-    in
-    Option.fold ~some:f ~none:() (get_loc_name pfs gamma loc);
-    Ok [ (heap, [], [], []) ]
+    with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+        let heap = SHeap.copy heap in
+        let f (loc_name : string) : unit =
+          if SL.active () then
+            SL.before_set_cell (sp_ms heap pfs gamma) loc_name prop (Lit Nono);
+          Option.fold
+            ~some:(fun ((fv_list, dom), mtdt) ->
+              SHeap.set heap loc_name (SFVL.remove prop fv_list) dom mtdt;
+              ())
+            ~none:() (SHeap.get heap loc_name)
+        in
+        Option.fold ~some:f ~none:() (get_loc_name pfs gamma loc);
+        Ok [ (heap, [], [], []) ])
 
   let set_domain
       (heap : t)
@@ -355,8 +436,15 @@ module M = struct
         SHeap.set heap loc_name fv_list (Some dom) mtdt);
     Ok [ (heap, [], new_pfs, []) ]
 
-  let get_metadata (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
-      action_ret =
+  let rec get_metadata (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt)
+      : action_ret =
+    with_lazy_loc heap pfs gamma loc get_metadata_core
+
+  and get_metadata_core
+      (heap : t)
+      (pfs : PFS.t)
+      (gamma : Type_env.t)
+      (loc : vt) : action_ret =
     let loc_name = get_loc_name pfs gamma loc in
 
     let make_gm_error (loc_name : string) : err_t =
@@ -382,7 +470,16 @@ module M = struct
       ~none:(Error [ ([ loc ], [ [ FLoc loc; FMetadata loc ] ], Expr.false_) ])
       loc_name
 
-  let set_metadata
+  let rec set_metadata
+      (heap : t)
+      (pfs : PFS.t)
+      (gamma : Type_env.t)
+      (loc : vt)
+      (mtdt : vt) : action_ret =
+    with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+        set_metadata_core heap pfs gamma loc mtdt)
+
+  and set_metadata_core
       (heap : t)
       (pfs : PFS.t)
       (gamma : Type_env.t)
@@ -471,11 +568,28 @@ module M = struct
     in
     result
 
-  let get_full_domain (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
-      action_ret =
+  let rec get_full_domain
+      (heap : t)
+      (pfs : PFS.t)
+      (gamma : Type_env.t)
+      (loc : vt) : action_ret =
+    with_lazy_loc heap pfs gamma loc get_full_domain_core
+
+  and get_full_domain_core
+      (heap : t)
+      (pfs : PFS.t)
+      (gamma : Type_env.t)
+      (loc : vt) : action_ret =
     let loc_name = get_loc_name pfs gamma loc in
     let f loc_name =
       let loc = Expr.loc_from_loc_name loc_name in
+      match
+        if SL.active () then SL.get_all_props (sp_ms heap pfs gamma) loc_name
+        else None
+      with
+      | Some (names, facts, types) ->
+          Ok [ (heap, [ loc; EList names ], facts, types) ]
+      | None -> (
       match SHeap.get heap loc_name with
       | None ->
           (* This should never happen *)
@@ -491,11 +605,24 @@ module M = struct
               gamma
           in
           if solver_ret then
-            let _, pos_fv_list =
-              SFVL.partition (fun _ fv -> fv = Lit Nono) fv_list
-            in
-            Ok [ (heap, [ loc; EList (SFVL.field_names pos_fv_list) ], [], []) ]
-          else raise (Failure "DEATH. TODO. get_full_domain. incomplete domain")
+            if SHeap.track_order () then
+              (* SERVPIPS (E15): ES2020 OrdinaryOwnPropertyKeys order *)
+              match SHeap.ordered_fields heap loc_name with
+              | Ok names -> Ok [ (heap, [ loc; EList names ], [], []) ]
+              | Error _ ->
+                  raise
+                    (Gillian.General.Servpips.Path_end
+                       {
+                         status = "unsupported";
+                         reason = "enumeration of an object with a symbolic key";
+                       })
+            else
+              let _, pos_fv_list =
+                SFVL.partition (fun _ fv -> fv = Lit Nono) fv_list
+              in
+              Ok
+                [ (heap, [ loc; EList (SFVL.field_names pos_fv_list) ], [], []) ]
+          else raise (Failure "DEATH. TODO. get_full_domain. incomplete domain"))
     in
 
     let result =
@@ -515,7 +642,7 @@ module M = struct
     Option.fold ~some:f ~none:() (get_loc_name pfs gamma loc);
     Ok [ (heap, [], [], []) ]
 
-  let execute_action
+  let rec execute_action
       ?matching:_
       (action : string)
       (heap : t)
@@ -571,7 +698,102 @@ module M = struct
       match args with
       | [ loc; _ ] -> remove_domain heap pfs gamma loc
       | _ -> raise (Failure "Internal Error. execute_action. remove_domain")
+    else if String.starts_with ~prefix:"Sp" action then
+      execute_servpips_action action heap pfs gamma args
     else raise (Failure "Internal Error. execute_action")
+
+  (** SERVPIPS memory actions (see ServpipsLazy.mli, "Memory actions"). *)
+  and execute_servpips_action
+      (action : string)
+      (heap : t)
+      (pfs : PFS.t)
+      (gamma : Type_env.t)
+      (args : vt list) : action_ret =
+    let ms = sp_ms heap pfs gamma in
+    let bad () =
+      raise (Failure ("Internal Error. execute_action. " ^ action))
+    in
+    let key (k : vt) : string =
+      match Reduction.reduce_lexpr ~pfs ~gamma k with
+      | Lit (String s) -> s
+      | _ ->
+          raise
+            (Gillian.General.Servpips.Path_end
+               {
+                 status = "unsupported";
+                 reason = action ^ ": symbolic property name";
+               })
+    in
+    let at_loc loc (k : t -> PFS.t -> Type_env.t -> string -> action_ret) =
+      with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+          match get_loc_name pfs gamma loc with
+          | Some l when SHeap.has_loc heap l -> k heap pfs gamma l
+          | _ ->
+              raise
+                (Gillian.General.Servpips.Path_end
+                   { status = "error"; reason = action ^ ": not an object" }))
+    in
+    if action = SL.a_lazy then
+      match args with
+      | [ Lit (String name); Lit (String shape); Lit (String kind); classes ] ->
+          let v, facts, types =
+            SL.register ms ~name ~shape ~kind ~classes ~parent:None
+          in
+          Ok [ (heap, [ v ], facts, types) ]
+      | _ -> bad ()
+    else if action = SL.a_member then
+      match args with
+      | [ x; k ] ->
+          let v, facts, types = SL.member ms x k in
+          Ok [ (heap, [ v ], facts, types) ]
+      | _ -> bad ()
+    else if action = SL.a_is_lazy then
+      match args with
+      | [ v; Lit (String mode) ] ->
+          Ok [ (heap, [ Lit (Bool (SL.is_lazy ms ~any:(mode = "any") v)) ], [], []) ]
+      | _ -> bad ()
+    else if action = SL.a_lazy_name then
+      match args with
+      | [ v ] ->
+          let r =
+            match SL.lazy_name ms v with
+            | Some s -> Expr.Lit (String s)
+            | None -> Lit Undefined
+          in
+          Ok [ (heap, [ r ], [], []) ]
+      | _ -> bad ()
+    else if action = SL.a_serialize then
+      match args with
+      | [ v ] ->
+          let j = ServpipsValue.serialize heap pfs gamma v in
+          let n = SL.stash_serialized j in
+          Ok [ (heap, [ Lit (Int (Z.of_int n)) ], [], []) ]
+      | _ -> bad ()
+    else if action = SL.a_mark_lazy_key then
+      match args with
+      | [ loc; k ] ->
+          let k = key k in
+          at_loc loc (fun heap pfs gamma l ->
+              SL.mark_lazy_key (sp_ms heap pfs gamma) ~loc:l ~key:k;
+              Ok [ (heap, [], [], []) ])
+      | _ -> bad ()
+    else if action = SL.a_define then
+      match args with
+      | [ loc; k; v ] ->
+          let k = key k in
+          at_loc loc (fun heap pfs gamma l ->
+              SL.define (sp_ms heap pfs gamma) ~loc:l ~key:k v;
+              Ok [ (heap, [], [], []) ])
+      | _ -> bad ()
+    else if action = SL.a_absent then
+      match args with
+      | [ loc; k ] ->
+          let k = key k in
+          at_loc loc (fun heap pfs gamma l ->
+              SL.absent (sp_ms heap pfs gamma) ~loc:l ~key:k;
+              Ok [ (heap, [], [], []) ])
+      | _ -> bad ()
+    else bad ()
 
   let ga_to_setter (a_id : string) : string =
     if a_id = JSILNames.aCell then JSILNames.setCell

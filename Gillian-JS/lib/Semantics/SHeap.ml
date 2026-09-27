@@ -16,8 +16,62 @@ type t = {
   smet : (string, Expr.t option) Hashtbl.t;
   cdmn : SS.t ref;
   sdmn : SS.t ref;
+  ord : (string, int Expr.Map.t) Hashtbl.t;
+      (** SERVPIPS (E15): creation sequence number of every present
+          (non-[none]) property of every object, maintained only in SERVPIPS
+          mode; used to enumerate own properties in ES2020
+          OrdinaryOwnPropertyKeys order. *)
 }
 [@@deriving yojson]
+
+(* ************************************************************** *
+ *  SERVPIPS: property creation order (E15) and clean-up guard     *
+ * ************************************************************** *)
+
+(** Is creation-order tracking on? (SERVPIPS mode only, so that upstream
+    behaviour is unchanged without [--servpips].) *)
+let track_order () = Gillian.General.Servpips.enabled ()
+
+(** Global, monotonic creation counter: only the relative order of the
+    properties of one object matters. *)
+let seq_counter = ref 0
+
+let next_seq () =
+  incr seq_counter;
+  !seq_counter
+
+(** Objects that [clean_up] must never remove (set by ServpipsLazy: lazily
+    materialised input objects start with no fields and no domain). *)
+let keep_hook : (string -> bool) ref = ref (fun _ -> false)
+
+let get_ord (heap : t) (loc : string) : int Expr.Map.t =
+  Option.value ~default:Expr.Map.empty (Hashtbl.find_opt heap.ord loc)
+
+(** Bring the order map of [loc] in line with its full field-value list:
+    forget absent or [none] fields, number new present fields (in map order;
+    only reached by bulk updates, which never add present fields in
+    practice). *)
+let reconcile_ord (heap : t) (loc : string) (fvl : SFVL.t) : unit =
+  if track_order () then
+    let m = get_ord heap loc in
+    let m =
+      Expr.Map.filter
+        (fun k _ ->
+          match SFVL.get k fvl with
+          | Some (Expr.Lit Nono) | None -> false
+          | Some _ -> true)
+        m
+    in
+    let m =
+      SFVL.fold
+        (fun k v m ->
+          match v with
+          | Expr.Lit Nono -> m
+          | _ -> if Expr.Map.mem k m then m else Expr.Map.add k (next_seq ()) m)
+        fvl m
+    in
+    if Expr.Map.is_empty m then Hashtbl.remove heap.ord loc
+    else Hashtbl.replace heap.ord loc m
 
 (* ************* *
  *  AUXILIARIES  *
@@ -51,6 +105,7 @@ let get_met (heap : t) (loc : string) : Expr.t option =
         (Failure "MetaData in both the concrete and symbolic part of the heap."))
 
 let set_fvl (heap : t) (loc : string) (fvl : SFVL.t) : unit =
+  reconcile_ord heap loc fvl;
   Hashtbl.remove heap.cfvl loc;
   Hashtbl.remove heap.sfvl loc;
   heap.cdmn := Var.Set.remove loc !(heap.cdmn);
@@ -117,6 +172,7 @@ let init () : t =
     smet = Hashtbl.create big_tbl_size;
     cdmn = ref SS.empty;
     sdmn = ref SS.empty;
+    ord = Hashtbl.create big_tbl_size;
   }
 
 (** Symbolic heap read heap(loc) *)
@@ -143,6 +199,15 @@ let set
 (** Symbolic heap put heap (loc, (perm, field)) is assigned to value *)
 let set_fv_pair (heap : t) (loc : string) (field : Expr.t) (value : Expr.t) :
     unit =
+  (if track_order () then
+     let m = get_ord heap loc in
+     match value with
+     | Expr.Lit Nono ->
+         if Expr.Map.mem field m then
+           Hashtbl.replace heap.ord loc (Expr.Map.remove field m)
+     | _ ->
+         if not (Expr.Map.mem field m) then
+           Hashtbl.replace heap.ord loc (Expr.Map.add field (next_seq ()) m));
   heap.cdmn := Var.Set.remove loc !(heap.cdmn);
   heap.sdmn := Var.Set.remove loc !(heap.sdmn);
   let add, sadd, rem =
@@ -184,6 +249,7 @@ let remove (heap : t) (loc : string) : unit =
   Hashtbl.remove heap.sdom loc;
   Hashtbl.remove heap.cmet loc;
   Hashtbl.remove heap.smet loc;
+  Hashtbl.remove heap.ord loc;
   heap.cdmn := Var.Set.remove loc !(heap.cdmn);
   heap.sdmn := Var.Set.remove loc !(heap.sdmn)
 
@@ -203,6 +269,7 @@ let copy (heap : t) : t =
     smet = Hashtbl.copy heap.smet;
     cdmn = ref !(heap.cdmn);
     sdmn = ref !(heap.sdmn);
+    ord = Hashtbl.copy heap.ord;
   }
 
 let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
@@ -270,6 +337,22 @@ let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
       L.(verbose (fun m -> m "CMET: %d" (Hashtbl.length heap.cmet)));
       L.(verbose (fun m -> m "SMET: %d" (Hashtbl.length heap.smet)));
     *)
+
+    (* SERVPIPS (E15): symbolic field names may be substituted *)
+    (if track_order () then
+       let remapped =
+         Hashtbl.fold
+           (fun loc m ac ->
+             if Hashtbl.mem heap.sfvl loc then
+               ( loc,
+                 Expr.Map.fold
+                   (fun k n m' -> Expr.Map.add (le_subst k) n m')
+                   m Expr.Map.empty )
+               :: ac
+             else ac)
+           heap.ord []
+       in
+       List.iter (fun (loc, m) -> Hashtbl.replace heap.ord loc m) remapped);
 
     (* Field-value lists *)
     Hashtbl.iter
@@ -487,7 +570,7 @@ let get_inv_metadata (heap : t) : (Expr.t, Expr.t) Hashtbl.t =
 let clean_up (heap : t) : unit =
   SS.iter
     (fun loc ->
-      match has_loc heap loc with
+      match has_loc heap loc && not (!keep_hook loc) with
       | false -> ()
       | true -> (
           let (fvl, dom), met = get_with_default heap loc in
@@ -534,3 +617,60 @@ let alocs (heap : t) : Var.Set.t =
        (fun _ oe ac ->
          Option.fold ~some:(fun oe -> union (Expr.alocs oe) ac) ~none:ac oe)
        heap.smet
+
+(* ************************************************************** *
+ *  SERVPIPS (E15): ES2020 OrdinaryOwnPropertyKeys order          *
+ * ************************************************************** *)
+
+(** [s] is an array index: a canonical decimal integer (no sign, no leading
+    zero except "0") whose value is at most 2^32 - 2. *)
+let is_array_index (s : string) : bool =
+  let n = String.length s in
+  n > 0 && n <= 10
+  && String.for_all (fun c -> c >= '0' && c <= '9') s
+  && (n = 1 || s.[0] <> '0')
+  && (n < 10 || String.compare s "4294967294" <= 0)
+
+(** Present (non-[none]) own fields of [loc] in ES2020 OrdinaryOwnPropertyKeys
+    order: array-index keys in ascending numeric order, then the other string
+    keys in creation order. [Error k] if some present field name [k] is not a
+    string literal (a symbolic key: the order is unknown). Without creation
+    information (tracking off) the string keys keep the map order. *)
+let ordered_fields (heap : t) (loc : string) : (Expr.t list, Expr.t) result =
+  let fvl = Option.value ~default:SFVL.empty (get_fvl heap loc) in
+  let present =
+    SFVL.fold
+      (fun k v ac ->
+        match v with
+        | Expr.Lit Nono -> ac
+        | _ -> k :: ac)
+      fvl []
+  in
+  match
+    List.find_opt
+      (function
+        | Expr.Lit (String _) -> false
+        | _ -> true)
+      present
+  with
+  | Some k -> Error k
+  | None ->
+      let name = function
+        | Expr.Lit (String s) -> s
+        | _ -> assert false
+      in
+      let idx, named =
+        List.partition (fun k -> is_array_index (name k)) present
+      in
+      let cmp_idx a b =
+        let a = name a and b = name b in
+        let c = compare (String.length a) (String.length b) in
+        if c <> 0 then c else String.compare a b
+      in
+      let m = get_ord heap loc in
+      let seq k = Option.value ~default:max_int (Expr.Map.find_opt k m) in
+      let cmp_named a b =
+        let c = compare (seq a) (seq b) in
+        if c <> 0 then c else String.compare (name a) (name b)
+      in
+      Ok (List.sort cmp_idx idx @ List.sort cmp_named named)

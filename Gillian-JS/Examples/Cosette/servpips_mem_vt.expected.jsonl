@@ -1,0 +1,14 @@
+{"ev":"decl","lvar":"#lvar_0","name":"event","sort":"JS","kind":"input","parent":null,"key":null,"parent_lvar":null,"parent_aloc":null,"shape":"S0","open":false,"site":null,"k":null}
+{"ev":"note","code":"vt","msg":"q","site":null,"data":{"vt":{"t":"obj","aloc":"#loc_197","props":[["b",{"t":"val","e":{"pp":"1.","ast":["Lit",["Num",1.0]]}}],["c",{"t":"arr","aloc":"#loc_199","items":[{"t":"val","e":{"pp":"1.","ast":["Lit",["Num",1.0]]}},{"t":"val","e":{"pp":"\"two\"","ast":["Lit",["String","two"]]}},{"t":"obj","aloc":"#loc_201","props":[["d",{"t":"val","e":{"pp":"3.","ast":["Lit",["Num",3.0]]}}]],"sym":[]}],"len":null}],["acc",{"t":"opaque","what":"accessor"}],["f",{"t":"opaque","what":"function"}]],"sym":[]}}}
+{"ev":"note","code":"vt","msg":"cyc","site":null,"data":{"vt":{"t":"obj","aloc":"#loc_215","props":[["z",{"t":"val","e":{"pp":"1.","ast":["Lit",["Num",1.0]]}}],["self",{"t":"opaque","what":"cycle"}]],"sym":[]}}}
+{"ev":"decl","lvar":"#lvar_1","name":"x","sort":"JS","kind":"input","parent":null,"key":null,"parent_lvar":null,"parent_aloc":null,"shape":"json","open":true,"site":null,"k":null}
+{"ev":"note","code":"vt","msg":"unmaterialised","site":null,"data":{"vt":{"t":"lazy","lvar":"#lvar_1","aloc":null,"written":[],"deleted":[]}}}
+{"ev":"lazy","lvar":"#lvar_0","aloc":"#loc_216","class":"Object","label":"json","len":null}
+{"ev":"decl","lvar":"#lvar_2","name":"event.o","sort":"JS","kind":"input","parent":"event","key":"o","parent_lvar":"#lvar_0","parent_aloc":"#loc_216","shape":{"type":"object","props":{"x":{"type":"number"}},"additional":"absent"},"open":false,"site":null,"k":null}
+{"ev":"lazy","lvar":"#lvar_2","aloc":"#loc_218","class":"Object","label":"json","len":null}
+{"ev":"decl","lvar":"#lvar_3","name":"event.o.x","sort":"JS","kind":"input","parent":"event.o","key":"x","parent_lvar":"#lvar_2","parent_aloc":"#loc_218","shape":{"type":"number"},"open":null,"site":null,"k":null}
+{"ev":"decl","lvar":"#lvar_4","name":"event.p","sort":"JS","kind":"input","parent":"event","key":"p","parent_lvar":"#lvar_0","parent_aloc":"#loc_216","shape":{"type":"object","additional":{"type":"string","optional":true}},"open":true,"site":null,"k":null}
+{"ev":"note","code":"vt","msg":"event","site":null,"data":{"vt":{"t":"lazy","lvar":"#lvar_0","aloc":"#loc_216","written":[["o",{"t":"lazy","lvar":"#lvar_2","aloc":"#loc_218","written":[["x",{"t":"val","e":{"pp":"7.","ast":["Lit",["Num",7.0]]}}]],"deleted":[]}]],"deleted":[]}}}
+{"ev":"note","code":"vt","msg":"pristine e","site":null,"data":{"vt":{"t":"val","e":{"pp":"false","ast":["Lit",["Bool",false]]}}}}
+{"ev":"note","code":"vt","msg":"pristine e.p","site":null,"data":{"vt":{"t":"val","e":{"pp":"true","ast":["Lit",["Bool",true]]}}}}
+{"ev":"note","code":"vt","msg":"pristine e.o","site":null,"data":{"vt":{"t":"val","e":{"pp":"false","ast":["Lit",["Bool",false]]}}}}
