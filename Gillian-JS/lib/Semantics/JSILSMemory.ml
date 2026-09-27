@@ -229,6 +229,17 @@ module M = struct
         SHeap.set_fv_pair heap loc_name prop v;
         Ok [ (heap, [], new_pfs, []) ])
 
+  (* SERVPIPS (E13): a branch of a memory action dropped because its
+     condition [f] is unsatisfiable with the path condition is reported as a
+     prune event (dropped side: [f]), as for the interpreter's branches *)
+  let servpips_memory_prune pfs gamma (f : Expr.t) =
+    if Gillian.General.Servpips.enabled ()
+       && not (Containers.SS.is_empty (Expr.lvars f))
+    then
+      Gillian.General.Servpips.record_prune ~guard:f ~guard_orig:f
+        ~kept:"else" ~by:"solver" ~pc:(PFS.to_list pfs)
+        ~types:(Type_env.to_list_expr gamma) ()
+
   let get_cell_core
       (heap : t)
       (pfs : PFS.t)
@@ -363,7 +374,9 @@ module M = struct
                                 (new_f :: PFS.to_list pfs) gamma
                             in
                             match sat with
-                            | false -> None
+                            | false ->
+                                servpips_memory_prune pfs gamma new_f;
+                                None
                             | true ->
                                 (* Cases in which the prop exists *)
                                 let heap' = SHeap.copy heap in
@@ -390,7 +403,9 @@ module M = struct
                       in
                       let dom_ret =
                         match sat with
-                        | false -> []
+                        | false ->
+                            servpips_memory_prune pfs gamma new_f;
+                            []
                         | true ->
                             [ (heap, [ loc; prop; Lit Nono ], [ new_f ], []) ]
                       in
