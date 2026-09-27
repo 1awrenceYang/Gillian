@@ -21,6 +21,10 @@ type t = {
           (non-[none]) property of every object, maintained only in SERVPIPS
           mode; used to enumerate own properties in ES2020
           OrdinaryOwnPropertyKeys order. *)
+  applied : (string, Expr.t) Hashtbl.t;
+      (** SERVPIPS (E19): substitution bindings (printed key -> value) already
+          applied to this heap, see [substitution_in_place]; SERVPIPS mode
+          only. *)
 }
 [@@deriving yojson]
 
@@ -173,6 +177,7 @@ let init () : t =
     cdmn = ref SS.empty;
     sdmn = ref SS.empty;
     ord = Hashtbl.create big_tbl_size;
+    applied = Hashtbl.create 16;
   }
 
 (** Symbolic heap read heap(loc) *)
@@ -270,6 +275,7 @@ let copy (heap : t) : t =
     cdmn = ref !(heap.cdmn);
     sdmn = ref !(heap.sdmn);
     ord = Hashtbl.copy heap.ord;
+    applied = Hashtbl.copy heap.applied;
   }
 
 let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
@@ -324,6 +330,28 @@ let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
 
 (** Modifies --heap-- in place updating it to subst(heap) *)
 let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
+  (* SERVPIPS (E19): SState.simplify re-derives the same substitution from
+     equalities that stay in the path condition (e.g. the class fact
+     [x == #loc] of a materialised LazyJSON value, kept on purpose) before
+     every memory action, and each application walks every object with
+     symbolic content -- with the full ES5 initial heap and the runtime
+     preamble, thousands of objects whose fields hold abstract locations.
+     A binding already applied to this heap is skipped: it is re-derived from
+     the path condition, which therefore still entails it, so an occurrence of
+     its key that re-entered the heap afterwards is equal to its value in
+     every model (memory actions resolve locations through the path
+     condition); only the normalisation is not repeated. *)
+  let subst =
+    if not (track_order ()) then subst
+    else
+      SSubst.filter subst (fun k v ->
+          let key = Fmt.to_to_string Expr.pp k in
+          match Hashtbl.find_opt heap.applied key with
+          | Some v' when Expr.equal v v' -> false
+          | _ ->
+              Hashtbl.replace heap.applied key v;
+              true)
+  in
   (* If the substitution is empty, there is nothing to be done *)
   if not (SSubst.domain subst None = Expr.Set.empty) then (
     (* The substitution is not empty *)
