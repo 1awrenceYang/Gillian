@@ -369,29 +369,23 @@ let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
 (** Substitution of the abstract locations themselves: [aloc] is merged into
     the location it is mapped to. *)
 let substitute_alocs (subst : SSubst.t) (heap : t) : unit =
-  let aloc_subst =
-    SSubst.filter subst (fun var _ ->
-        match var with
-        | ALoc _ -> true
-        | _ -> false)
-  in
-  SSubst.iter aloc_subst (fun aloc new_loc ->
-      let aloc =
-        match aloc with
-        | ALoc loc -> loc
-        | _ -> raise (Failure "Impossible by construction")
-      in
-      let new_loc =
-        match (new_loc : Expr.t) with
-        | Lit (Loc loc) -> loc
-        | ALoc loc -> loc
-        | _ ->
-            raise
-              (Failure
-                 (Printf.sprintf "Heap substitution fail for loc: %s"
-                    ((Fmt.to_to_string Expr.pp) new_loc)))
-      in
-      merge_loc heap new_loc aloc)
+  (* the ALoc bindings, in the substitution's order (as a filtered copy
+     would iterate them) *)
+  SSubst.iter subst (fun aloc new_loc ->
+      match aloc with
+      | ALoc aloc ->
+          let new_loc =
+            match (new_loc : Expr.t) with
+            | Lit (Loc loc) -> loc
+            | ALoc loc -> loc
+            | _ ->
+                raise
+                  (Failure
+                     (Printf.sprintf "Heap substitution fail for loc: %s"
+                        ((Fmt.to_to_string Expr.pp) new_loc)))
+          in
+          merge_loc heap new_loc aloc
+      | _ -> ())
 
 (** Substitution of the symbolic part of the object at [loc] (upstream
     semantics of the full walk below, for one object). *)
@@ -428,7 +422,7 @@ let substitute_object (subst : SSubst.t) le_subst (heap : t) (loc : string) :
 
 (** Modifies --heap-- in place updating it to subst(heap) *)
 let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
-  if SSubst.domain subst None = Expr.Set.empty then ()
+  if SSubst.is_empty subst then ()
   else if track_order () then (
     (* SERVPIPS (E19): SState.simplify applies a substitution before every
        memory action (e.g. the class fact [x == #loc] of a materialised
@@ -439,9 +433,7 @@ let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
        can change; they are substituted exactly as the full walk would, and
        re-indexed. *)
     let le_subst = SSubst.subst_in_expr subst ~partial:true in
-    let names =
-      Expr.Set.fold (fun k acc -> add_names acc k) (SSubst.domain subst None) []
-    in
+    let names = SSubst.fold subst (fun k _ acc -> add_names acc k) [] in
     let cands =
       List.fold_left
         (fun acc v ->
