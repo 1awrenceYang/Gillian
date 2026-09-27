@@ -1091,6 +1091,10 @@ let max_enum_order_keys = 3
 
 let enumerated_key = "@sp_enumerated"
 
+(** Largest length explored (one branch per feasible length 0..n) when an
+    input array of symbolic length is enumerated. *)
+let max_enum_lengths = 10
+
 let rec permutations = function
   | [] -> [ [] ]
   | l ->
@@ -1217,29 +1221,56 @@ let get_all_props (ms : mstate) (loc : string) :
         unsupported "enumeration of an open object";
       if meta_cell ms.heap loc symcells_key <> None then
         unsupported "enumeration of an input array after a symbolic-index read";
-      let n =
+      (* the length on this path: concrete, or one branch per feasible value
+         when there are at most max_enum_lengths + 1 of them (a contract
+         bound such as maxLen), each adding len = n *)
+      let lengths =
         match array_len_kind c.members with
-        | Fixed n -> n
+        | Fixed n -> [ (ms.heap, n, []) ]
         | Sym -> (
-            match concrete_of ms (Expr.LVar (len_var info c)) with
+            let l = Expr.LVar (len_var info c) in
+            match concrete_of ms l with
             | Some (Lit (Num f)) when Float.is_integer f && f >= 0. && f < 1e7 ->
-                int_of_float f
-            | _ -> unsupported "enumeration of an input array of symbolic length")
+                [ (ms.heap, int_of_float f, []) ]
+            | _ ->
+                let num n = Expr.Lit (Num (float_of_int n)) in
+                if sat ms [ Expr.BinOp (num max_enum_lengths, FLessThan, l) ] then
+                  unsupported
+                    (Printf.sprintf
+                       "enumeration of an input array of symbolic length (more \
+                        than %d possible lengths)"
+                       (max_enum_lengths + 1));
+                let feasible =
+                  List.filter
+                    (fun n -> sat ms [ eq l (num n) ])
+                    (List.init (max_enum_lengths + 1) Fun.id)
+                in
+                (* never drop the configuration (see member_access) *)
+                let feasible = if feasible = [] then [ 0 ] else feasible in
+                let k = List.length feasible in
+                List.mapi
+                  (fun j n ->
+                    ((if j < k - 1 then SHeap.copy ms.heap else ms.heap), n, [ eq l (num n) ]))
+                  feasible)
       in
-      let facts = ref [] and types = ref [] in
-      for idx = 0 to n - 1 do
-        let k = string_of_int idx in
-        if cell ms.heap loc (str k) = None then (
-          let child = get_child ~parent_aloc:loc info k in
-          let ms' = { ms with gamma = gamma_with ms !types } in
-          let f, t, _ = child_facts ms' info i k child in
-          facts := !facts @ f;
-          types := !types @ t;
-          store_member ms.heap loc k child)
-      done;
-      match SHeap.ordered_fields ms.heap loc with
-      | Ok names -> Some [ (ms.heap, names, !facts, !types) ]
-      | Error _ -> unsupported "enumeration of an object with a symbolic key")
+      Some
+        (List.map
+           (fun (heap, n, lfacts) ->
+             let facts = ref lfacts and types = ref [] in
+             for idx = 0 to n - 1 do
+               let k = string_of_int idx in
+               if cell heap loc (str k) = None then (
+                 let child = get_child ~parent_aloc:loc info k in
+                 let ms' = { ms with heap; gamma = gamma_with ms !types } in
+                 let f, t, _ = child_facts ms' info i k child in
+                 facts := !facts @ f;
+                 types := !types @ t;
+                 store_member heap loc k child)
+             done;
+             match SHeap.ordered_fields heap loc with
+             | Ok names -> (heap, names, !facts, !types)
+             | Error _ -> unsupported "enumeration of an object with a symbolic key")
+           lengths))
 
 (* ------------------------------------------------------------------------ *)
 (* Registration, prefetched members, queries                               *)

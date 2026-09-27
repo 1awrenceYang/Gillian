@@ -71,8 +71,10 @@
     {b Enumeration} ([GetAllProps]) of an open lazy JSON object, of a view,
     or of any object whose metadata has [@sp_open] set: [unsupported]. A
     lazy array whose length is concrete is enumerated exactly (its missing
-    elements are created first). A lazy object of a closed struct is
-    enumerated exactly: every member gets its cell, a member whose existence
+    elements are created first); a symbolic length with at most 11 feasible
+    values (0..10, e.g. a contract bound maxLen) forks over them (each
+    branch adds [len = n]), otherwise [unsupported]. A lazy object of a
+    closed struct is enumerated exactly: every member gets its cell, a member whose existence
     is undetermined forks on "value = undefined" (absent: tombstone), and,
     the JSON text order of an input being unknown, one branch per order of
     the present non-index members, recorded as the object's creation order
