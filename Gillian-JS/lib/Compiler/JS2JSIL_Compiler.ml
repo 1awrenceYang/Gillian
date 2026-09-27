@@ -1940,13 +1940,35 @@ let rec translate_expr tr_ctx e :
 
       (* BIND *)
       let x_ba = fresh_var () in
+      (* SERVPIPS: [new] of a chain of bound functions (15.3.4.5.2) constructs
+         the innermost target with all the bound arguments, innermost first
+         (i__boundTarget); upstream handles one level only *)
+      let sp_flat =
+        if !Gillian.Utils.Config.servpips_semantics then Some (fresh_var ())
+        else None
+      in
       let cmd_get_ba =
-        LBasic (Lookup (x_ba, PVar xfvm, Lit (String "@boundArguments")))
+        match sp_flat with
+        | Some x_flat ->
+            LCall
+              (x_flat, Lit (String "i__boundTarget"), [ PVar x_f_val ], None, None)
+        | None ->
+            LBasic (Lookup (x_ba, PVar xfvm, Lit (String "@boundArguments")))
       in
 
       let x_tf = fresh_var () in
       let cmd_get_tf =
-        LBasic (Lookup (x_tf, PVar xfvm, Lit (String "@targetFunction")))
+        match sp_flat with
+        | Some x_flat ->
+            LBasic
+              (Assignment (x_tf, BinOp (PVar x_flat, LstNth, Lit (Num 0.))))
+        | None ->
+            LBasic (Lookup (x_tf, PVar xfvm, Lit (String "@targetFunction")))
+      in
+      let e_ba =
+        match sp_flat with
+        | Some x_flat -> BinOp (PVar x_flat, LstNth, Lit (Num 1.))
+        | None -> PVar x_ba
       in
 
       (* x_bref_fprototype := ref-o(x_tf, "prototype");  *)
@@ -2021,7 +2043,7 @@ let rec translate_expr tr_ctx e :
                  ( LstCat,
                    [
                      EList [ PVar x_bbody; PVar x_bfscope; PVar x_bthis ];
-                     PVar x_ba;
+                     e_ba;
                      EList x_args_gv;
                    ] ) ))
       in

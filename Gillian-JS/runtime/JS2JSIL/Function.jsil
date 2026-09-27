@@ -238,10 +238,19 @@ proc FP_bind (xsc, vthis, thisArg) {
           [m, "@call"] := field_call;
 
           (* Adapting for our construct *)
-          field_constr := [mt, "@construct"];
+          (* SERVPIPS: a target without [[Construct]] (a built-in such as
+             Math.max) gives a bound function without [[Construct]]
+             (15.3.4.5 step 20 is conditional on the target having one);
+             upstream reads the absent cell and fails *)
+          en := extern servpips_enabled ();
+          goto [en] spc upc;
+  spc:    hc := hasField(mt, "@construct");
+          goto [hc] upc noc;
+  upc:    field_constr := [mt, "@construct"];
           [m, "@construct"] := field_constr;
 
           (* Step 15 onward *)
+  noc:    skip;
           targetClass := [mt, "@class"];
           goto [targetClass = "Function"] fun nofun;
 

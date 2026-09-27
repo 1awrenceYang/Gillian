@@ -1232,6 +1232,25 @@ proc i__callFunction (f, t, argl) {
   elab:   throw
 };
 
+(* SERVPIPS: {{ innermost target, all bound arguments (innermost first) }} of
+   a bound function f, for [new] of a chain of bound functions (15.3.4.5.2:
+   the [[Construct]] of a bound function constructs its target with the
+   bound arguments prepended) *)
+proc i__boundTarget (f) {
+          m := metadata(f);
+          tf := [m, "@targetFunction"];
+          ba := [m, "@boundArguments"];
+  loop:   mt := metadata(tf);
+          bnd := hasField(mt, "@boundThis");
+          goto [bnd] inner done;
+  inner:  mba := [mt, "@boundArguments"];
+          ba := l+ (mba, ba);
+          tf := [mt, "@targetFunction"];
+          goto loop;
+  done:   ret := {{ tf, ba }};
+          return
+};
+
 (* ********** *)
 (* ISRESERVED *)
 (* ********** *)
