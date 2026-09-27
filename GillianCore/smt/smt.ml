@@ -1067,7 +1067,9 @@ module Servpips_enc = struct
   let floor x = int_to_real (real_to_int x)
   let ceil x = num_neg (floor (num_neg x))
   let abs x = ite (num_leq zero x) x (num_neg x)
-  let sgn x = ite (num_lt zero x) (rk 1.) (ite (num_lt x zero) (rk (-1.)) zero)
+  (* M_sgn is copysign(1, x) (the JSIL runtime tells -0 from +0 with it);
+     a symbolic zero is +0 (A6: -0 only as a concrete literal) *)
+  let sgn x = ite (num_lt x zero) (rk (-1.)) (rk 1.)
   let round x = floor (num_add x (rk 0.5))
   let trunc x = ite (num_leq zero x) (floor x) (num_neg (floor (num_neg x)))
   let two32 = rk 4294967296.

@@ -632,6 +632,19 @@ let test_input_not_loc () =
     (r (eq (lv "#y") (Expr.ALoc "#other")) <> Expr.false_);
   Reduction.servpips_input_not_loc := saved
 
+let test_msgn_copysign () =
+  (* the JSIL runtime (i__sameValue, Math.min/max) tells -0 from +0 with
+     M_sgn: it must stay copysign(1, x) under SERVPIPS semantics *)
+  let chk x exp =
+    Alcotest.(check (float 0.)) (Fmt.str "M_sgn %h" x) exp (unop M_sgn x)
+  in
+  chk 0. 1.;
+  chk (-0.) (-1.);
+  chk 5. 1.;
+  chk (-5.) (-1.);
+  chk Float.infinity 1.;
+  chk Float.neg_infinity (-1.)
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -656,7 +669,8 @@ let tests : unit Alcotest.test_case list =
     ("V1b Math.floor vs Node", `Quick, test_unary "floor" (unop M_floor) ~exact_zero:true);
     ("V1b Math.ceil vs Node", `Quick, test_unary "ceil" (unop M_ceil) ~exact_zero:true);
     ("V1b Math.round vs Node", `Quick, test_unary "round" (unop M_round) ~exact_zero:true);
-    ("V1b Math.sign vs Node", `Quick, test_unary "sign" (unop M_sgn) ~exact_zero:true);
+    ("V1b Math.sign (Arith_utils.js_sign) vs Node", `Quick, test_unary "sign" Arith_utils.js_sign ~exact_zero:true);
+    ("M_sgn is copysign(1, x) (R2)", `Quick, test_msgn_copysign);
     ("V1b Math.abs vs Node", `Quick, test_unary "abs" (unop M_abs) ~exact_zero:true);
     ("V1b % (fmod) vs Node", `Quick, test_fmod);
     ("Ext_list.remove_duplicates keeps the list consistent", `Quick, test_ext_list_remove_duplicates);
