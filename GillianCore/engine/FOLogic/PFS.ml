@@ -26,6 +26,11 @@ let fresh_stamp () =
 
 type t = {
   lst : Expr.t Ext_list.t;
+  mutable shadow : Expr.t list;
+      (** SERVPIPS (diagnostics, [Config.servpips_shadow_pc]): every
+          formula ever added by [extend], newest first, even if the
+          simplification later removed it (e.g. absorbed a type fact into
+          the typing environment); kept by [copy] *)
   mutable idx : int H.t option;
   mutable gen : int;
   mutable src : Expr.t list option;
@@ -37,10 +42,11 @@ let to_yojson (pfs : t) = Ext_list.to_yojson Expr.to_yojson pfs.lst
 
 let of_yojson j =
   Result.map
-    (fun lst -> { lst; idx = None; gen = fresh_stamp (); src = None })
+    (fun lst -> { lst; shadow = []; idx = None; gen = fresh_stamp (); src = None })
     (Ext_list.of_yojson Expr.of_yojson j)
 
-let mk lst = { lst; idx = None; gen = fresh_stamp (); src = None }
+let mk lst = { lst; shadow = []; idx = None; gen = fresh_stamp (); src = None }
+let shadow (pfs : t) = pfs.shadow
 let generation (pfs : t) = pfs.gen
 let servpips_set_generation (pfs : t) (g : int) = pfs.gen <- g
 
@@ -85,6 +91,7 @@ let mem (pfs : t) (f : Expr.t) =
   if !Config.servpips_semantics then H.mem (index pfs) f else mem_scan pfs f
 
 let extend (pfs : t) (a : Expr.t) : unit =
+  if !Config.servpips_shadow_pc then pfs.shadow <- a :: pfs.shadow;
   if not (mem pfs a) then (
     Ext_list.add a pfs.lst;
     pfs.gen <- fresh_stamp ();
@@ -102,6 +109,7 @@ let length (pfs : t) = Ext_list.length pfs.lst
 let copy (pfs : t) : t =
   {
     lst = Ext_list.copy pfs.lst;
+    shadow = pfs.shadow;
     idx = Option.map H.copy pfs.idx;
     gen = pfs.gen;
     src = pfs.src;

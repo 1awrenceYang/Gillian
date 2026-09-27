@@ -332,6 +332,33 @@ val report_sharing : where:string -> string -> unit
 (** Number of violations found so far (including repeated ones). *)
 val sharing_count : int ref
 
+(** {2 Typing check (diagnostics only)}
+
+    With the environment variable [SERVPIPS_TYPING_CHECK] set (to anything
+    but [""] or ["0"]) in SERVPIPS mode, every time the pure part of a state
+    is read for an event ([State.servpips_pc]: end, call, prune, note
+    events), each entry [x : T] of its typing environment that was not
+    declared ({!declare_type}: an assumed type, e.g. of a typed fresh
+    variable or of a LazyJSON variable with a single-type mask, or a type
+    returned by a memory action) is checked to be entailed by the path
+    condition (the path condition and [not (typeOf x = T)] must be
+    unsatisfiable without [x]'s type); a failure is reported by
+    {!report_unasserted}. This is the check of the ["typing": "asserted"]
+    capability of the hello event. It costs one solver query per type. *)
+
+val typing_check : unit -> bool
+
+(** Record that [x : t] is declared (assumed), not derived. *)
+val declare_type : string -> Type.t -> unit
+
+val is_declared_type : string -> Type.t -> bool
+
+(** An unasserted type: [note{typing-unasserted}] (once per distinct
+    message), a line on stderr, and [stats.fatal] (first one). *)
+val report_unasserted : string -> unit
+
+val unasserted_count : int ref
+
 (** {2 Sampling profiler (diagnostics only)}
 
     With the environment variable [SERVPIPS_SAMPLE=<file>[:<ms>]] (default

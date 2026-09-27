@@ -14,8 +14,9 @@
 #   -k        keep the work directory
 #   -v        print the diff and output tail of failing examples
 #   PATTERN   only run examples whose file name contains one of the patterns
-# Environment: SERVPIPS_BRANCH_CHECK (branch-sharing assertion) and
-# SERVPIPS_STEP_BUDGET are passed to the engine container when set.
+# Environment: SERVPIPS_BRANCH_CHECK (branch-sharing assertion),
+# SERVPIPS_TYPING_CHECK and SERVPIPS_STEP_BUDGET are passed to the engine
+# container when set.
 #
 # Kinds of examples (servpips_<package>_<name>.js; packages core, mem, rt, s0;
 # hand-written GIL probes servpips_<package>_<name>.gil are wpst tests run
@@ -64,7 +65,7 @@ while getopts "i:g:j:ukvh" opt; do
     u) UPDATE=1 ;;
     k) KEEP=1 ;;
     v) VERBOSE=1 ;;
-    *) sed -n '2,49p' "$0"; exit 2 ;;
+    *) sed -n '2,50p' "$0"; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -197,7 +198,7 @@ run_gillian() { # run_gillian NAME ARGS...
   else
     # the diagnostic switches of the engine reach the container when set
     docker run --rm --name "sp-examples-$$-$name" --user "$(id -u):$(id -g)" \
-      -e SERVPIPS_BRANCH_CHECK -e SERVPIPS_STEP_BUDGET \
+      -e SERVPIPS_BRANCH_CHECK -e SERVPIPS_STEP_BUDGET -e SERVPIPS_TYPING_CHECK \
       --network none --memory 8g -v "$WORK:$WORK" -w "$dir" "$IMG" "$@"
   fi
 }

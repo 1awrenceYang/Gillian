@@ -42,6 +42,11 @@ let enable (c : config) =
   enabled_ref := true;
   start_time := Unix.gettimeofday ();
   Config.servpips_semantics := true;
+  (* the shadow path conditions are only kept for the typing check
+     (SERVPIPS_TYPING_CHECK, see typing_check) *)
+  (match Sys.getenv_opt "SERVPIPS_TYPING_CHECK" with
+  | None | Some ("" | "0") -> ()
+  | Some _ -> Config.servpips_shadow_pc := true);
   Smt.servpips_enable ();
   !start_sampler_ref ()
 
@@ -548,6 +553,38 @@ let report_sharing ~where (msg : string) =
     prerr_endline ("SERVPIPS branch-sharing: " ^ msg);
     note ~code:"branch-sharing" ~msg ();
     set_fatal ("branch-sharing: " ^ msg))
+
+(* Typing check (diagnostics only; never changes results). *)
+let typing_check_on =
+  lazy
+    (match Sys.getenv_opt "SERVPIPS_TYPING_CHECK" with
+    | None | Some ("" | "0") -> false
+    | Some _ -> true)
+
+let typing_check () = !enabled_ref && Lazy.force typing_check_on
+
+let declared_types : (string * Type.t, unit) Hashtbl.t = Hashtbl.create 256
+
+let declare_type x t =
+  if typing_check () then Hashtbl.replace declared_types (x, t) ()
+
+let is_declared_type x t = Hashtbl.mem declared_types (x, t)
+let unasserted_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
+let unasserted_count = ref 0
+
+let report_unasserted (msg : string) =
+  incr unasserted_count;
+  if not (Hashtbl.mem unasserted_seen msg) then (
+    Hashtbl.replace unasserted_seen msg ();
+    let msg = truncate_reason ~max:1500 msg in
+    prerr_endline ("SERVPIPS typing-unasserted: " ^ msg);
+    (match Sys.getenv_opt "SERVPIPS_TYPING_CHECK" with
+    | Some "trace" ->
+        prerr_endline
+          (Printexc.raw_backtrace_to_string (Printexc.get_callstack 25))
+    | _ -> ());
+    note ~code:"typing-unasserted" ~msg ();
+    set_fatal ("typing-unasserted: " ^ msg))
 
 (* Sampling profiler (diagnostics only; never changes results). *)
 let sampling = ref false

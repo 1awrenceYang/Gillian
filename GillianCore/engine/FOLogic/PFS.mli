@@ -43,6 +43,11 @@ val servpips_set_generation : t -> int -> unit
     the formula set (the record, the list, the index when present). *)
 val servpips_mutables : t -> (string * Obj.t) list
 
+(** SERVPIPS (diagnostics): with [Config.servpips_shadow_pc], every formula
+    ever added to the set by {!extend} (newest first), including those the
+    simplification later removed; [[]] otherwise. *)
+val shadow : t -> Expr.t list
+
 (*
 (** [nth_get pfs n] returns the n-th pure formula of [pfs] *)
 val nth_get : t -> int -> Formula.t

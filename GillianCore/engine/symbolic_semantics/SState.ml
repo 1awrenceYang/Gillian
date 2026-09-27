@@ -348,6 +348,9 @@ module Make (SMemory : SMemory.S) :
     match Typing.reverse_type_lexpr true gamma [ (v, t) ] with
     | None -> None
     | Some gamma' ->
+        (* SERVPIPS (typing check): assumed types are declared *)
+        if Servpips.typing_check () then
+          Type_env.iter gamma' (fun x t -> Servpips.declare_type x t);
         Type_env.extend gamma gamma';
         Some state
 
@@ -568,7 +571,43 @@ module Make (SMemory : SMemory.S) :
       asrts_store @ SMemory.assertions heap @ asrts_pfs
       @ [ Types (Type_env.to_list_expr gamma) ]
 
+  (* SERVPIPS (diagnostics): the typing check of Servpips.typing_check *)
+  let servpips_check_types (pfs : PFS.t) (gamma : Type_env.t) =
+    let pc = PFS.to_list pfs in
+    (* premises: the path condition and every formula asserted on the path
+       (the shadow keeps those that the simplification absorbed into the
+       typing environment or otherwise removed) *)
+    let premises = PFS.shadow pfs @ pc in
+    if not (List.mem Expr.false_ pc) then
+      Type_env.iter gamma (fun x t ->
+          if
+            Names.is_lvar_name x
+            && not (Servpips.is_declared_type x t)
+          then
+            let g = Type_env.copy gamma in
+            Type_env.remove g x;
+            let neg =
+              Expr.UnOp
+                (Not, BinOp (UnOp (TypeOf, LVar x), Equal, Lit (Type t)))
+            in
+            (* the solver directly: no simplification, reduction or type
+               inference of the engine takes part in the check *)
+            match
+              Smt.check_sat
+                (Expr.Set.of_list (neg :: premises))
+                (Type_env.as_hashtbl g)
+            with
+            | Some m when not (Smt.is_unknown_model m) ->
+                Servpips.report_unasserted
+                  (Fmt.str "%s : %s is not entailed by the path condition %a"
+                     x (Type.str t)
+                     Fmt.(list ~sep:(any " /\\ ") Expr.pp)
+                     pc)
+            | _ -> ()
+            | exception _ -> ())
+
   let servpips_pc ({ pfs; gamma; _ } : t) =
+    if Servpips.typing_check () then servpips_check_types pfs gamma;
     (PFS.to_list pfs, Type_env.to_list_expr gamma)
 
   let servpips_mutables ({ heap; store; pfs; gamma; _ } : t) =

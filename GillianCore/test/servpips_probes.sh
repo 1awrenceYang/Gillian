@@ -4,7 +4,7 @@
 # usage: GillianCore/test/servpips_probes.sh IMAGE [--update] [glob ...]
 # Per-file headers: "SERVPIPS-ARGS: <extra wpst args>" (".gil" files also get -a) and
 # "SERVPIPS-EVENTS: <comma list of kinds>" (default end,note,stats; see servpips_events.py).
-# SERVPIPS_BRANCH_CHECK and SERVPIPS_STEP_BUDGET are passed to the engine container when set.
+# SERVPIPS_BRANCH_CHECK, SERVPIPS_TYPING_CHECK and SERVPIPS_STEP_BUDGET are passed to the engine container when set.
 set -u
 IMG=$1; shift
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -23,7 +23,7 @@ for f in $(cd $W && ls ${PATS[@]} 2>/dev/null | sort -u); do
   args=$(sed -n 's/.*SERVPIPS-ARGS: *\(.*[^ ]\) *\*[/)].*/\1/p' $W/$f | head -1)
   case $f in *.gil) case " $args " in *" -a "*) ;; *) args="$args -a";; esac;; esac
   kinds=$(sed -n 's/.*SERVPIPS-EVENTS: *\([^ ]*\) *\*[/)].*/\1/p' $W/$f | head -1); kinds=${kinds:-end,note,stats}
-  docker run --rm --user $(id -u):$(id -g) -e SERVPIPS_BRANCH_CHECK -e SERVPIPS_STEP_BUDGET --network none --memory 8g -v $W:$W -w $W/run $IMG \
+  docker run --rm --user $(id -u):$(id -g) -e SERVPIPS_BRANCH_CHECK -e SERVPIPS_TYPING_CHECK -e SERVPIPS_STEP_BUDGET --network none --memory 8g -v $W:$W -w $W/run $IMG \
     wpst ../src/$f --servpips --servpips-log $W/$b.ev.jsonl -l disabled --result-dir .gillian_$b $args > $W/$b.out 2>&1
   if ! python3 $EV check $W/$b.ev.jsonl > $W/$b.check 2>&1; then FAIL=$((FAIL+1)); echo "FAIL $f (integrity)"; cat $W/$b.check; continue; fi
   if [ $UPDATE = 1 ]; then python3 $EV filter $W/$b.ev.jsonl $kinds > $EX/$b.expected.jsonl; echo "UPDATED $b.expected.jsonl"; continue; fi
