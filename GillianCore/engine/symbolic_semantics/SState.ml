@@ -205,10 +205,14 @@ module Make (SMemory : SMemory.S) :
     let open Syntaxes.List in
     let { heap; store; pfs; gamma; spec_vars } = state in
     let pc = Gpc.make ~matching:false ~pfs ~gamma () in
-    let+ Gbranch.{ value; pc } = SMemory.execute_action action heap pc args in
+    let results = SMemory.execute_action action heap pc args in
+    (* SERVPIPS (E19): a single result keeps the store (the interpreter uses
+       the state linearly: the old state is not used after the action) *)
+    let single = !Config.servpips_semantics && List.length results = 1 in
+    let+ Gbranch.{ value; pc } = results in
     match value with
     | Ok (new_heap, vs) ->
-        let store = SStore.copy store in
+        let store = if single then store else SStore.copy store in
         let new_state =
           { heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma; spec_vars }
         in

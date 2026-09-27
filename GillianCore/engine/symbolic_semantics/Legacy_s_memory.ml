@@ -108,6 +108,11 @@ module Modernize (Old_memory : S) = struct
     match
       execute_action ~matching:pc.matching action_name heap pc.pfs pc.gamma args
     with
+    | Ok [ (new_heap, v, [], []) ] when !Config.servpips_semantics ->
+        (* SERVPIPS (E19): one result that adds no formula and no type: the
+           path condition is unchanged, no copy (the memory actions of the
+           symbolic state are used linearly) *)
+        [ Gbranch.{ pc; value = Ok (new_heap, v) } ]
     | Ok oks ->
         let+ new_heap, v, new_fofs, new_types = oks in
         let new_pfs = PFS.copy pc.pfs in
