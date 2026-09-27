@@ -225,6 +225,10 @@ val get_all_props :
 
 val str : string -> Expr.t
 val reduce : mstate -> Expr.t -> Expr.t
+
+(** A literal equal to the expression on this path, when the reduction or an
+    equality of the path condition gives one. *)
+val concrete_of : mstate -> Expr.t -> Expr.t option
 val fvl_of : SHeap.t -> string -> SFVL.t
 val cell : SHeap.t -> string -> Expr.t -> Expr.t option
 val meta_cell : SHeap.t -> string -> string -> Expr.t option

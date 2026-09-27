@@ -2,6 +2,7 @@
 
 open Gillian.Gil_syntax
 module SL = ServpipsLazy
+module FOSolver = Gillian.Logic.FOSolver
 module Servpips = Gillian.General.Servpips
 module J = Yojson.Safe
 
@@ -179,6 +180,31 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
         match SL.js_prop heap l "length" with
         | Some e -> SL.reduce ms e
         | None -> raise (Opaque "model:array-without-length")
+      in
+      let len =
+        match len with
+        | Lit _ -> len
+        | e -> (
+            match SL.concrete_of ms e with
+            | Some c -> c
+            | None ->
+                (* e.g. the result of Array.prototype.map over an input
+                   array of symbolic length: the path condition may entail
+                   that the length is the number m of index cells 0..m-1 *)
+                let rec count i =
+                  if i >= max_items then i
+                  else
+                    match SL.cell heap l (SL.str (string_of_int i)) with
+                    | Some (EList (Lit (String ("d" | "a")) :: _)) -> count (i + 1)
+                    | _ -> i
+                in
+                let m = Expr.Lit (Num (float_of_int (count 0))) in
+                if
+                  FOSolver.check_entailment Containers.SS.empty ms.pfs
+                    [ Expr.BinOp (e, Equal, m) ]
+                    ms.gamma
+                then m
+                else e)
       in
       match len with
       | Lit (Num f) when Float.is_integer f && f >= 0. ->
