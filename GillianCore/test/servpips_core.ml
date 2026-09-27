@@ -7,6 +7,8 @@ module SF = Smt.Servpips_functions
 module Reduction = Engine.Reduction
 module Typing = Engine.Typing
 module Type_env = Engine.Type_env
+module Config = Utils.Config
+module Arith_utils = Utils.Arith_utils
 
 let str s = Expr.Lit (String s)
 let num f = Expr.Lit (Num f)
@@ -305,6 +307,185 @@ let test_typing () =
         "reverse typing" (Some Type.StringType) (Type_env.get g' "#a")
   | None -> Alcotest.fail "reverse typing failed"
 
+(* ------------------------------------------------------------------ *)
+(* E7: NaN / Infinity in reductions                                     *)
+(* ------------------------------------------------------------------ *)
+
+let test_ieee_reduction () =
+  with_env @@ fun () ->
+  Config.servpips_semantics := true;
+  let red e = Reduction.reduce_lexpr e in
+  let is b e = Expr.equal (red e) (Expr.Lit (Bool b)) in
+  let nan = num Float.nan and inf = num Float.infinity and ninf = num Float.neg_infinity in
+  let lt a b = Expr.BinOp (a, FLessThan, b) and le a b = Expr.BinOp (a, FLessThanEqual, b) in
+  Alcotest.(check bool) "NaN = NaN is false" true (is false (eq nan nan));
+  Alcotest.(check bool) "NaN < 0.7 is false" true (is false (lt nan (num 0.7)));
+  Alcotest.(check bool) "not (NaN < 0.7) is true" true (is true (Expr.UnOp (Not, lt nan (num 0.7))));
+  Alcotest.(check bool) "not (0.7 <= NaN) is true" true (is true (Expr.UnOp (Not, le (num 0.7) nan)));
+  Alcotest.(check bool) "false = (NaN < x) is true" true
+    (is true (eq (Expr.Lit (Bool false)) (lt nan (lv "#x"))));
+  Alcotest.(check bool) "x = NaN is false" true (is false (eq (lv "#x") nan));
+  Alcotest.(check bool) "NaN <= x is false" true (is false (le nan (lv "#x")));
+  Alcotest.(check bool) "x < Infinity (x finite)" true (is true (lt (lv "#x") inf));
+  Alcotest.(check bool) "Infinity < x is false" true (is false (lt inf (lv "#x")));
+  Alcotest.(check bool) "-Infinity <= x" true (is true (le ninf (lv "#x")));
+  Alcotest.(check bool) "x = -Infinity is false" true (is false (eq (lv "#x") ninf));
+  Alcotest.(check bool) "Infinity = Infinity" true (is true (eq inf inf));
+  Alcotest.(check bool) "0 = -0" true (is true (eq (num 0.) (num (-0.))));
+  Alcotest.(check bool) "not (x < 1) still rewritten" true
+    (Expr.equal (red (Expr.UnOp (Not, lt (lv "#x") (num 1.)))) (le (num 1.) (lv "#x")));
+  let ts e = Expr.UnOp (ToStringOp, e) in
+  Alcotest.(check bool) "ToString(x) = \"5\" -> x = 5" true
+    (Expr.equal (red (eq (ts (lv "#x")) (str "5"))) (eq (lv "#x") (num 5.)));
+  Alcotest.(check bool) "ToString(x) = \"1.0\" is false" true (is false (eq (ts (lv "#x")) (str "1.0")));
+  Alcotest.(check bool) "ToString(x) = \"1e21\" is false" true (is false (eq (ts (lv "#x")) (str "1e21")));
+  Alcotest.(check bool) "ToString(x) = \"1e+21\" -> x = 1e21" true
+    (Expr.equal (red (eq (ts (lv "#x")) (str "1e+21"))) (eq (lv "#x") (num 1e21)));
+  Alcotest.(check (option bool)) "is_different ToString(x) \"5\"" None
+    (Reduction.is_different [] (ts (lv "#x")) (str "5"));
+  Alcotest.(check (option bool)) "is_different ToString(x) \"-5\"" None
+    (Reduction.is_different [] (ts (lv "#x")) (str "-5"));
+  Alcotest.(check (option bool)) "is_different ToString(x) \"a\"" (Some true)
+    (Reduction.is_different [] (ts (lv "#x")) (str "a"));
+  Alcotest.(check bool) "structural Literal.equal unchanged" true
+    (Literal.equal (Num Float.nan) (Num Float.nan));
+  Alcotest.(check bool) "Literal.ieee_equal NaN" false
+    (Literal.ieee_equal (Num Float.nan) (Num Float.nan))
+
+(* ------------------------------------------------------------------ *)
+(* E16 / E8 / V1b: conformance with Node (servpips_conformance.json)    *)
+(* ------------------------------------------------------------------ *)
+
+let conformance =
+  lazy
+    (let candidates =
+       (match Sys.getenv_opt "SERVPIPS_CONFORMANCE" with
+       | Some f -> [ f ]
+       | None -> [])
+       @ [ "servpips_conformance.json"; "GillianCore/test/servpips_conformance.json" ]
+     in
+     match List.find_opt Sys.file_exists candidates with
+     | Some f -> Yojson.Safe.from_file f
+     | None -> Alcotest.fail "servpips_conformance.json not found")
+
+let of_bits hex = Int64.float_of_bits (Int64.of_string ("0x" ^ hex))
+
+let same_double a b =
+  (Float.is_nan a && Float.is_nan b)
+  || Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)
+
+let field name =
+  match Lazy.force conformance with
+  | `Assoc l -> (
+      match List.assoc_opt name l with
+      | Some (`List xs) -> xs
+      | _ -> Alcotest.fail ("conformance field missing: " ^ name))
+  | _ -> Alcotest.fail "bad conformance file"
+
+let n2_samples =
+  (* the 23 strings of experiment N2 (design 0.2), values from Node 20 *)
+  [
+    ("1_000", Float.nan); ("inf", Float.nan); ("nan", Float.nan); ("0x1p3", Float.nan);
+    ("  12  ", 12.); ("0b11", 3.); ("0o7", 7.); ("1e400", Float.infinity);
+    ("Infinity", Float.infinity); ("-Infinity", Float.neg_infinity); ("", 0.); (" ", 0.);
+    ("1.", 1.); (".5", 0.5); ("+.5e1", 5.); ("0x", Float.nan); ("12abc", Float.nan);
+    (" 12", 12.); ("1e", Float.nan); ("0X1F", 31.); ("-0x10", Float.nan);
+    ("Infinityx", Float.nan); ("  -Infinity ", Float.neg_infinity);
+  ]
+
+let test_n2 () =
+  List.iter
+    (fun (s, v) ->
+      let got = Arith_utils.js_string_to_number s in
+      if not (same_double got v) then
+        Alcotest.failf "js_string_to_number %S = %h, expected %h" s got v)
+    n2_samples
+
+let test_string_to_number () =
+  let bad = ref 0 in
+  List.iter
+    (function
+      | `List [ `String s; `String hex ] ->
+          let exp = of_bits hex in
+          let got = Arith_utils.js_string_to_number s in
+          if not (same_double got exp) then (
+            incr bad;
+            if !bad <= 10 then
+              Fmt.epr "StringToNumber %S: got %h expected %h@." s got exp);
+          (* numlit (byte-level regex) agrees with Node on ASCII strings *)
+          if String.for_all (fun c -> Char.code c < 128) s then
+            if SF.numlit_matches s <> not (Float.is_nan exp) then (
+              incr bad;
+              if !bad <= 10 then Fmt.epr "numlit %S disagrees with Node@." s)
+      | _ -> Alcotest.fail "bad string_to_number entry")
+    (field "string_to_number");
+  Alcotest.(check int) "StringToNumber / numlit mismatches" 0 !bad
+
+let test_numlit_smt_vs_node () =
+  (* the SMT regex on the first ASCII strings of the conformance data *)
+  let bad = ref 0 and n = ref 0 in
+  List.iter
+    (function
+      | `List [ `String s; `String hex ] when !n < 250 && String.for_all (fun c -> Char.code c < 128) s ->
+          incr n;
+          let exp = not (Float.is_nan (of_bits hex)) in
+          let r = sat [ app "str.in_re.numlit" [ str s ] ] in
+          if r <> (if exp then `Sat else `Unsat) then (
+            incr bad;
+            Fmt.epr "smt numlit %S disagrees with Node@." s)
+      | _ -> ())
+    (field "string_to_number");
+  Alcotest.(check int) "SMT numlit mismatches" 0 !bad
+
+let test_number_to_string () =
+  let bad = ref 0 in
+  List.iter
+    (function
+      | `List [ `String hex; `String exp ] ->
+          let x = of_bits hex in
+          let got = Arith_utils.js_number_to_string x in
+          if got <> exp then (
+            incr bad;
+            if !bad <= 10 then Fmt.epr "Number::toString %h: got %s expected %s@." x got exp)
+      | _ -> Alcotest.fail "bad number_to_string entry")
+    (field "number_to_string");
+  Alcotest.(check int) "Number::toString mismatches" 0 !bad
+
+let test_unary name (f : float -> float) ~exact_zero () =
+  let bad = ref 0 in
+  List.iter
+    (function
+      | `List [ `String hx; `String hr ] ->
+          let x = of_bits hx and exp = of_bits hr in
+          let got = f x in
+          let ok = if exact_zero then same_double got exp else same_double got exp || got = exp in
+          if not ok then (
+            incr bad;
+            if !bad <= 10 then Fmt.epr "%s %h: got %h expected %h@." name x got exp)
+      | _ -> Alcotest.fail "bad unary entry")
+    (field name);
+  Alcotest.(check int) (name ^ " mismatches") 0 !bad
+
+let unop op x =
+  Config.servpips_semantics := true;
+  match Engine.CExprEval.evaluate_unop op (Literal.Num x) with
+  | Literal.Num r -> r
+  | _ -> Float.nan
+
+let test_fmod () =
+  let bad = ref 0 in
+  List.iter
+    (function
+      | `List [ `String ha; `String hb; `String hr ] ->
+          let a = of_bits ha and b = of_bits hb and exp = of_bits hr in
+          let got = Float.rem a b in
+          if not (same_double got exp) then (
+            incr bad;
+            if !bad <= 10 then Fmt.epr "fmod %h %h: got %h expected %h@." a b got exp)
+      | _ -> Alcotest.fail "bad fmod entry")
+    (field "fmod");
+  Alcotest.(check int) "fmod mismatches" 0 !bad
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -317,4 +498,18 @@ let tests : unit Alcotest.test_case list =
     ("smt non-finite literal", `Quick, test_encoding_failure);
     ("reduction of builtins", `Quick, test_reduction);
     ("typing of builtins", `Quick, test_typing);
+    ("E7 IEEE reductions", `Quick, test_ieee_reduction);
+    ("E16 StringToNumber N2 samples", `Quick, test_n2);
+    ("V1b StringToNumber + numlit vs Node", `Quick, test_string_to_number);
+    ("V1b SMT numlit vs Node", `Quick, test_numlit_smt_vs_node);
+    ("V1b Number::toString vs Node", `Quick, test_number_to_string);
+    ("V1b ToInt32 vs Node", `Quick, test_unary "to_int32" Arith_utils.to_int32 ~exact_zero:false);
+    ("V1b ToUint32 vs Node", `Quick, test_unary "to_uint32" Arith_utils.to_uint32 ~exact_zero:false);
+    ("V1b ToUint16 vs Node", `Quick, test_unary "to_uint16" Arith_utils.to_uint16 ~exact_zero:false);
+    ("V1b Math.floor vs Node", `Quick, test_unary "floor" (unop M_floor) ~exact_zero:true);
+    ("V1b Math.ceil vs Node", `Quick, test_unary "ceil" (unop M_ceil) ~exact_zero:true);
+    ("V1b Math.round vs Node", `Quick, test_unary "round" (unop M_round) ~exact_zero:true);
+    ("V1b Math.sign vs Node", `Quick, test_unary "sign" (unop M_sgn) ~exact_zero:true);
+    ("V1b Math.abs vs Node", `Quick, test_unary "abs" (unop M_abs) ~exact_zero:true);
+    ("V1b % (fmod) vs Node", `Quick, test_fmod);
   ]

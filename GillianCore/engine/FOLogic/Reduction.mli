@@ -42,3 +42,8 @@ val reduce_assertion :
   Gil_syntax.Asrt.t
 
 val is_tautology : ?pfs:PFS.t -> ?gamma:Type_env.t -> Gil_syntax.Expr.t -> bool
+
+(** [is_different pfs e1 e2]: [Some true] if [e1] and [e2] are definitely
+    different, [Some false] if syntactically equal, [None] if unknown (used in
+    set reasoning; exported for the SERVPIPS unit tests). *)
+val is_different : Expr.t list -> Expr.t -> Expr.t -> bool option

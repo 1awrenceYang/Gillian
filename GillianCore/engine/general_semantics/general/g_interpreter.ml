@@ -511,6 +511,15 @@ struct
             ~reason:("audit: exception: " ^ msg)
             ~pc ~types ()
 
+  (* Is the path condition of [state] (definitely) unsatisfiable? An unknown
+     answer or a failure counts as satisfiable. *)
+  let servpips_pc_unsat (state : State.t) =
+    match State.assume_a (State.copy state) [ Expr.true_ ] with
+    | Some _ -> false
+    | None -> true
+    | exception ((Stack_overflow | Out_of_memory | Sys.Break) as e) -> raise e
+    | exception _ -> false
+
   (* Does an exception message come from an unsupported construct (e.g. the
      SMT encoding's "DEATH" failures)? *)
   let servpips_unsupported_msg msg =
@@ -1981,7 +1990,8 @@ struct
               if servpips_unsupported_msg msg then "unsupported" else "error"
             in
             Servpips.internal_exception ~msg;
-            servpips_end state ~status ~reason:("exception: " ^ msg) ();
+            if servpips_pc_unsat state then Servpips.record_infeasible ()
+            else servpips_end state ~status ~reason:("exception: " ^ msg) ();
             [])
       states
 
@@ -2328,7 +2338,10 @@ struct
               (Fmt.list ~sep:(Fmt.any "; ") pp_err_t)
               errors
           in
-          servpips_end error_state ~status:"error" ~reason ();
+          (* an error on a path whose condition is unsatisfiable is not a
+             real execution: count it as an infeasible leaf *)
+          if servpips_pc_unsat error_state then Servpips.record_infeasible ()
+          else servpips_end error_state ~status:"error" ~reason ();
           continue_or_pause rest_confs
             (fun ?selector () -> f rest_confs selector results)
             eval_step_state)

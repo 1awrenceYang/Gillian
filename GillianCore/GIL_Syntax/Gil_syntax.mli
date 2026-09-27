@@ -93,6 +93,18 @@ module Literal : sig
   (** Pretty-printer *)
   val pp : t Fmt.t
 
+  (** SERVPIPS (E7): IEEE semantic equality: numbers compare with IEEE [=]
+      (NaN is equal to nothing, [0 = -0]), lists element-wise, other
+      literals structurally. The derived [equal] (structural, NaN equal to
+      itself) is unchanged. *)
+  val ieee_equal : t -> t -> bool
+
+  (** SERVPIPS (E7): IEEE [<] / [<=] on two numbers (false when one is NaN);
+      [None] unless both are numbers. *)
+  val ieee_lt : t -> t -> bool option
+
+  val ieee_leq : t -> t -> bool option
+
   (** Returns the type of a literal *)
   val type_of : t -> Type.t
 

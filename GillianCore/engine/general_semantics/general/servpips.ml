@@ -40,6 +40,7 @@ let enable (c : config) =
   config_ref := Some c;
   enabled_ref := true;
   start_time := Unix.gettimeofday ();
+  Config.servpips_semantics := true;
   Smt.servpips_enable ()
 
 (* Non-finite floats are not JSON: encode them as {"nonfinite": ...}. *)

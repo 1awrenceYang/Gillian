@@ -27,6 +27,27 @@ let rec equal la lb =
   | LList ll, LList lr -> List.for_all2 equal ll lr
   | _ -> false
 
+(** SERVPIPS (E7): IEEE semantic equality ([Num]: NaN is equal to nothing,
+    [0 = -0]); structural elsewhere. [equal] (structural) is unchanged. *)
+let rec ieee_equal la lb =
+  match (la, lb) with
+  | Num a, Num b -> a = b
+  | LList ll, LList lr ->
+      List.length ll = List.length lr && List.for_all2 ieee_equal ll lr
+  | _ -> equal la lb
+
+(** SERVPIPS (E7): IEEE [<] and [<=] on numbers (false with NaN); [None] if
+    not both numbers. *)
+let ieee_lt la lb =
+  match (la, lb) with
+  | Num a, Num b -> Some (a < b)
+  | _ -> None
+
+let ieee_leq la lb =
+  match (la, lb) with
+  | Num a, Num b -> Some (a <= b)
+  | _ -> None
+
 let to_yojson = TypeDef__.literal_to_yojson
 let of_yojson = TypeDef__.literal_of_yojson
 

@@ -416,12 +416,108 @@ let rec get_nth_of_string (str : Expr.t) (idx : int) : Expr.t option =
 (* SET REASONING HELPER FUNCTIONS *)
 (**********************************)
 
+(* ------------------------------------------------------------------ *)
+(* SERVPIPS (E7): IEEE semantics of atoms with non-finite literals      *)
+(* ------------------------------------------------------------------ *)
+
+let rec servpips_lit_nonfinite (l : Literal.t) =
+  match l with
+  | Num n -> not (Float.is_finite n)
+  | LList ls -> List.exists servpips_lit_nonfinite ls
+  | _ -> false
+
+(* Does [e] contain a NaN / Infinity / -Infinity literal? *)
+let rec servpips_has_nonfinite (e : Expr.t) : bool =
+  let f = servpips_has_nonfinite in
+  match e with
+  | Lit l -> servpips_lit_nonfinite l
+  | LVar _ | PVar _ | ALoc _ -> false
+  | UnOp (_, e) | Exists (_, e) | ForAll (_, e) -> f e
+  | BinOp (a, _, b) -> f a || f b
+  | LstSub (a, b, c) -> f a || f b || f c
+  | NOp (_, es) | EList es | ESet es | FuncApp (_, es) | ConstructorApp (_, es)
+    -> List.exists f es
+  | Cases (e, cs) -> f e || List.exists (fun (_, _, e) -> f e) cs
+
+let servpips_is_nonfinite_num (e : Expr.t) =
+  match e with
+  | Lit (Num n) -> not (Float.is_finite n)
+  | _ -> false
+
+(* Total-order rewrites (not (a < b) -> b <= a, ...) are only valid when
+   neither side can be NaN: in SERVPIPS mode, symbolic numbers are finite
+   (assumption A6), so only non-finite literals are a concern. *)
+let servpips_total_order_ok (a : Expr.t) (b : Expr.t) =
+  (not !Config.servpips_semantics)
+  || not (servpips_has_nonfinite a || servpips_has_nonfinite b)
+
+(* IEEE value of [a op b] (op in =, <, <=) when a side is a non-finite
+   literal, if it is determined; non-literal sides are finite numbers (A6)
+   when they contain no non-finite literal. *)
+let servpips_ieee_atom (op : BinOp.t) (a : Expr.t) (b : Expr.t) : bool option =
+  let is_nan = function
+    | Expr.Lit (Num n) -> Float.is_nan n
+    | _ -> false
+  in
+  let pinf = function
+    | Expr.Lit (Num n) -> n = Float.infinity
+    | _ -> false
+  in
+  let ninf = function
+    | Expr.Lit (Num n) -> n = Float.neg_infinity
+    | _ -> false
+  in
+  let finite_sym (e : Expr.t) =
+    (match e with
+    | Lit _ -> false
+    | _ -> true)
+    && not (servpips_has_nonfinite e)
+  in
+  match (a, b) with
+  | Lit la, Lit lb -> (
+      match op with
+      | Equal -> Some (Literal.ieee_equal la lb)
+      | FLessThan -> Literal.ieee_lt la lb
+      | FLessThanEqual -> Literal.ieee_leq la lb
+      | _ -> None)
+  | _ when is_nan a || is_nan b -> (
+      match op with
+      | Equal | FLessThan | FLessThanEqual -> Some false
+      | _ -> None)
+  | _ -> (
+      match op with
+      | Equal when (pinf a || ninf a) && finite_sym b -> Some false
+      | Equal when (pinf b || ninf b) && finite_sym a -> Some false
+      | FLessThan when pinf a || ninf b -> Some false
+      | FLessThan when ninf a && finite_sym b -> Some true
+      | FLessThan when pinf b && finite_sym a -> Some true
+      | FLessThanEqual when (ninf a && finite_sym b) || (pinf b && finite_sym a)
+        -> Some true
+      | FLessThanEqual when (pinf a && finite_sym b) || (ninf b && finite_sym a)
+        -> Some false
+      | _ -> None)
+
+(* SERVPIPS: is [s] a possible result of Number::toString (a canonical
+   finite number string, or NaN / Infinity / -Infinity)? *)
+let servpips_num_string (s : string) =
+  s = "NaN" || s = "Infinity" || s = "-Infinity"
+  || s <> ""
+     &&
+     let v = Arith_utils.js_string_to_number s in
+     Float.is_finite v && String.equal (Arith_utils.js_number_to_string v) s
+
 let is_different (pfs : Expr.t list) (li : Expr.t) (lj : Expr.t) : bool option =
   match li = lj with
   | true -> Some false
   | false -> (
       match (li, lj) with
       | Expr.Lit x, Lit y when not (Literal.equal x y) -> Some true
+      (* SERVPIPS: the upstream test below uses the regexp "0-9" (a literal
+         string, not a class) and declares ToString(x) different from, e.g.,
+         "5"; only strings outside the range of Number::toString are *)
+      | UnOp (ToStringOp, _), Lit (String s) | Lit (String s), UnOp (ToStringOp, _)
+        when !Config.servpips_semantics ->
+          if servpips_num_string s then None else Some true
       | UnOp (ToStringOp, _), Lit (String "")
       | Lit (String ""), UnOp (ToStringOp, _) -> Some true
       | UnOp (ToStringOp, _), Lit (String s)
@@ -1485,8 +1581,10 @@ and reduce_lexpr_loop
             | _, _ -> UnOp (ToNumberOp, UnOp (ToStringOp, fle))))
     | UnOp (LstRev, UnOp (LstRev, le)) -> le
     (* Less than and lessthaneq *)
-    | UnOp (Not, BinOp (le1, FLessThan, le2)) -> BinOp (le2, FLessThanEqual, le1)
-    | UnOp (Not, BinOp (le1, FLessThanEqual, le2)) -> BinOp (le2, FLessThan, le1)
+    | UnOp (Not, BinOp (le1, FLessThan, le2))
+      when servpips_total_order_ok le1 le2 -> BinOp (le2, FLessThanEqual, le1)
+    | UnOp (Not, BinOp (le1, FLessThanEqual, le2))
+      when servpips_total_order_ok le1 le2 -> BinOp (le2, FLessThan, le1)
     | UnOp (Not, BinOp (le1, ILessThan, le2)) -> BinOp (le2, ILessThanEqual, le1)
     | UnOp (Not, BinOp (le1, ILessThanEqual, le2)) -> BinOp (le2, ILessThan, le1)
     | UnOp (op, le) -> (
@@ -1657,8 +1755,28 @@ and reduce_lexpr_loop
                 BinOp
              (terrifying)
        ------------------------- *)
+    (* SERVPIPS (E7): comparisons and equalities with non-finite literals
+       are decided with IEEE semantics before any algebraic rewrite *)
+    | BinOp (e1, ((Equal | FLessThan | FLessThanEqual) as op), e2)
+      when !Config.servpips_semantics
+           && (servpips_is_nonfinite_num e1 || servpips_is_nonfinite_num e2)
+      -> (
+        let fe1 = f e1 in
+        let fe2 = f e2 in
+        match servpips_ieee_atom op fe1 fe2 with
+        | Some b -> Expr.bool b
+        | None -> BinOp (fe1, op, fe2))
+    | BinOp ((Lit _ as e1), ((Equal | FLessThan | FLessThanEqual) as op), (Lit _ as e2))
+      when !Config.servpips_semantics
+           && (servpips_has_nonfinite e1 || servpips_has_nonfinite e2) -> (
+        match servpips_ieee_atom op e1 e2 with
+        | Some b -> Expr.bool b
+        | None -> le)
     (* BinOps: Equalities (basics) *)
-    | BinOp (e1, Equal, e2) when Expr.equal e1 e2 -> Expr.true_
+    | BinOp (e1, Equal, e2)
+      when Expr.equal e1 e2
+           && not (!Config.servpips_semantics && servpips_has_nonfinite e1) ->
+        Expr.true_
     (* BinOps: Equalities (injective unops) *)
     | BinOp (UnOp (IUnaryMinus, e1), Equal, UnOp (IUnaryMinus, e2))
     | BinOp (UnOp (FUnaryMinus, e1), Equal, UnOp (FUnaryMinus, e2))
@@ -1777,10 +1895,10 @@ and reduce_lexpr_loop
         BinOp (e2, ILessThanEqual, e1)
     | BinOp (Lit (Bool false), Equal, BinOp (e1, ILessThanEqual, e2)) ->
         BinOp (e2, ILessThan, e1)
-    | BinOp (Lit (Bool false), Equal, BinOp (e1, FLessThan, e2)) ->
-        BinOp (e2, FLessThanEqual, e1)
-    | BinOp (Lit (Bool false), Equal, BinOp (e1, FLessThanEqual, e2)) ->
-        BinOp (e2, FLessThan, e1)
+    | BinOp (Lit (Bool false), Equal, BinOp (e1, FLessThan, e2))
+      when servpips_total_order_ok e1 e2 -> BinOp (e2, FLessThanEqual, e1)
+    | BinOp (Lit (Bool false), Equal, BinOp (e1, FLessThanEqual, e2))
+      when servpips_total_order_ok e1 e2 -> BinOp (e2, FLessThan, e1)
     | BinOp
         (* x + (-y) = 0f <=> x = y *)
         (BinOp (LVar x, FPlus, UnOp (FUnaryMinus, LVar y)), Equal, Lit (Num 0.))
@@ -1896,6 +2014,17 @@ and reduce_lexpr_loop
             And,
             BinOp (sr, Equal, Lit (String "")) )
     (* by injectivity *)
+    | BinOp (UnOp (ToStringOp, le1), Equal, Lit (String s))
+    | BinOp (Lit (String s), Equal, UnOp (ToStringOp, le1))
+      when !Config.servpips_semantics -> (
+        (* SERVPIPS (E8): ToString(x) = s iff s is the canonical string of
+           the number x (exact Number::toString) *)
+        match s with
+        | "Infinity" | "-Infinity" | "NaN" -> le
+        | _ ->
+            if servpips_num_string s then
+              Expr.BinOp (le1, Equal, Lit (Num (Arith_utils.js_string_to_number s)))
+            else Expr.false_)
     | BinOp (UnOp (ToStringOp, le1), Equal, Lit (String s))
     | BinOp (Lit (String s), Equal, UnOp (ToStringOp, le1)) -> (
         match s with

@@ -118,10 +118,13 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
             round_nearest n
       in
       unary_num_thing lit f
+  | M_sgn when !Config.servpips_semantics -> unary_num_thing lit js_sign
   | M_sgn -> unary_num_thing lit (fun x -> copysign 1.0 x)
   | M_sin -> unary_num_thing lit sin
   | M_sqrt -> unary_num_thing lit sqrt
   | M_tan -> unary_num_thing lit tan
+  | ToStringOp when !Config.servpips_semantics ->
+      String (js_number_to_string (as_num lit))
   | ToStringOp ->
       let n = as_num lit in
       String (float_to_string_inner n)
@@ -129,6 +132,8 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | ToUint16Op -> unary_num_thing lit to_uint16
   | ToInt32Op -> unary_num_thing lit to_int32
   | ToUint32Op -> unary_num_thing lit to_uint32
+  | ToNumberOp when !Config.servpips_semantics ->
+      Num (js_string_to_number (as_str lit))
   | ToNumberOp ->
       let s = as_str lit in
       if s = "" then Num 0.
