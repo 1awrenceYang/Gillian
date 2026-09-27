@@ -309,16 +309,36 @@ module M = struct
                   let a_set_inclusion : Expr.t =
                     UnOp (Not, BinOp (prop, SetMem, dom))
                   in
+                  (* SERVPIPS (E19): a literal name and a domain of literals
+                     (every property lookup miss on a concrete object, e.g.
+                     along the prototype chain): decide the membership
+                     directly instead of through the solver interface, and
+                     reduce the new domain without context (it is literal) *)
+                  let literal_miss =
+                    !Gillian.Utils.Config.servpips_semantics
+                    &&
+                    match (prop, dom) with
+                    | Lit p, ESet es ->
+                        List.for_all
+                          (function
+                            | Expr.Lit l -> not (Literal.equal l p)
+                            | _ -> false)
+                          es
+                    | _ -> false
+                  in
                   if
-                    FOSolver.check_entailment Containers.SS.empty pfs
-                      [ a_set_inclusion ] gamma
+                    literal_miss
+                    || FOSolver.check_entailment Containers.SS.empty pfs
+                         [ a_set_inclusion ] gamma
                   then (
                     let new_domain : Expr.t =
                       NOp (SetUnion, [ dom; ESet [ prop ] ])
                     in
                     let new_domain =
-                      Reduction.reduce_lexpr ?gamma:(Some gamma) ?pfs:(Some pfs)
-                        new_domain
+                      if literal_miss then Reduction.reduce_lexpr new_domain
+                      else
+                        Reduction.reduce_lexpr ?gamma:(Some gamma)
+                          ?pfs:(Some pfs) new_domain
                     in
                     let fv_list' = SFVL.add prop (Lit Nono) fv_list in
                     SHeap.set heap loc_name fv_list' (Some new_domain) mtdt;
