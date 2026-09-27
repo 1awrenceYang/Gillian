@@ -77,7 +77,15 @@
     {b Prefetched members} ([member]): the child variable of [x] at [k]
     without materialising [x] (or of the materialised object at [k] when the
     key was not written). The same variable fills the cell if [x] is later
-    materialised as an object; [undefined] when no class admits [k].
+    materialised as an object; [undefined] when no class admits [k]. On a
+    view (an object of a class with a resolver) it is the member of the
+    underlying input value given by the class's member structure: this is
+    how a resolver reads the input it presents (e.g. the string member
+    [Body] of an S3 response, wrapped in a Buffer).
+    [SpDefine] of [length] on an object of class [Array] writes the array
+    length descriptor (writable, not enumerable, not configurable). The
+    value tree of a view reports the keys its resolver defined with a value
+    other than the input's own member as written (see {!ServpipsValue}).
 
     {1 Memory actions}
 
@@ -230,6 +238,13 @@ val is_dirty : SHeap.t -> string -> bool
     [None] for arbitrary array elements. *)
 val children_list : string -> (string option * string) list
 
+(** Member shape (and optionality) of a key in the member structure of a
+    class, whether or not the class has a resolver (for a view: the
+    structure of the underlying input value). *)
+val class_struct_member : class_spec -> string -> (Yojson.Safe.t * bool) option
+
+(** Member LazyJSON creates itself for a key (on a [GetCell] miss): as
+    {!class_struct_member}, but none for a class with a resolver. *)
 val class_member : class_spec -> string -> (Yojson.Safe.t * bool) option
 val lazykeys_key : string
 val written_key : string

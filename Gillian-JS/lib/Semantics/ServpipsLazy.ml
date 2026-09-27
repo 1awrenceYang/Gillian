@@ -665,10 +665,12 @@ let mark_dirty (heap : SHeap.t) (x : string) : unit =
 (* Children                                                                 *)
 (* ------------------------------------------------------------------------ *)
 
-(** Member shape contributed by class [c] for key [k] (with optionality). *)
-let class_member (c : class_spec) (k : string) : (J.t * bool) option =
-  if c.resolver <> None then None
-  else if String.length k > 0 && k.[0] = '@' then None
+(** Member shape of key [k] in the member structure of class [c] (with
+    optionality), whether or not the class has a resolver: for a view (a
+    class with a resolver) this is the structure of the underlying input
+    value, which its resolver reads through prefetched members. *)
+let class_struct_member (c : class_spec) (k : string) : (J.t * bool) option =
+  if String.length k > 0 && k.[0] = '@' then None
   else
     match c.cls with
     | Obj_cls -> obj_member_rule c.members k
@@ -682,6 +684,11 @@ let class_member (c : class_spec) (k : string) : (J.t * bool) option =
               else None
           | Sym -> Some (items, false))
 
+(** Member created by LazyJSON itself for key [k] of an object of class [c]
+    (GetCell miss): none for views, whose members come from their resolver. *)
+let class_member (c : class_spec) (k : string) : (J.t * bool) option =
+  if c.resolver <> None then None else class_struct_member c k
+
 let with_optional (s : J.t) (opt : bool) : J.t =
   if not opt then s
   else
@@ -692,7 +699,7 @@ let with_optional (s : J.t) (opt : bool) : J.t =
 let contributions (info : info) (k : string) : (int * J.t) list =
   List.filter_map
     (fun (i, c) ->
-      Option.map (fun (s, o) -> (i, with_optional s o)) (class_member c k))
+      Option.map (fun (s, o) -> (i, with_optional s o)) (class_struct_member c k))
     (List.mapi (fun i c -> (i, c)) (Array.to_list info.classes))
 
 (** The child of [info] at the concrete key [k] (global memo, one decl per
@@ -1256,12 +1263,13 @@ let member (ms : mstate) (xv : Expr.t) (kv : Expr.t) :
   let admitted =
     match mat with
     | Some (al, i) ->
+        (* for a view (class with a resolver) this is the member of the
+           underlying input value, read by the resolver *)
         let c = info.classes.(i) in
-        if c.resolver <> None then unsupported "prefetched member of a lazy view";
         if List.mem k (string_set ms.heap al written_key)
            || List.mem k (string_set ms.heap al deleted_key)
         then unsupported "prefetched member of a written key";
-        if class_member c k = None then None else Some (Some i)
+        if class_struct_member c k = None then None else Some (Some i)
     | None -> if contributions info k = [] then None else Some None
   in
   match admitted with
@@ -1290,7 +1298,15 @@ let mark_lazy_key (ms : mstate) ~(loc : string) ~(key : string) : unit =
   set_add ms.heap loc lazykeys_key key
 
 let define (ms : mstate) ~(loc : string) ~(key : string) (v : Expr.t) : unit =
-  raw_set_cell ms.heap loc (str key) (data_desc v);
+  let desc =
+    (* the [length] of an array is {writable, not enumerable, not
+       configurable} (e.g. a view of class "Array" defining its length) *)
+    match (key, meta_cell ms.heap loc "@class") with
+    | "length", Some (Lit (String "Array")) ->
+        Expr.EList [ str "d"; v; true_; Lit (Bool false); Lit (Bool false) ]
+    | _ -> data_desc v
+  in
+  raw_set_cell ms.heap loc (str key) desc;
   mark_lazy_key ms ~loc ~key
 
 let absent (ms : mstate) ~(loc : string) ~(key : string) : unit =
