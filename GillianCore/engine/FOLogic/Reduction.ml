@@ -420,6 +420,14 @@ let rec get_nth_of_string (str : Expr.t) (idx : int) : Expr.t option =
 (* SERVPIPS (E7): IEEE semantics of atoms with non-finite literals      *)
 (* ------------------------------------------------------------------ *)
 
+(* SERVPIPS: [servpips_input_not_loc x l] holds when the logical variable [x]
+   denotes an input value whose object identity (if it is an object) can only
+   be one of the locations the target language allocates for it, and [l] is
+   not one of them; then [x == l] is false. Installed by the target language
+   (Gillian-JS: LazyJSON inputs never alias a program object). *)
+let servpips_input_not_loc : (string -> string -> bool) ref =
+  ref (fun _ _ -> false)
+
 let rec servpips_lit_nonfinite (l : Literal.t) =
   match l with
   | Num n -> not (Float.is_finite n)
@@ -1787,6 +1795,10 @@ and reduce_lexpr_loop
     | BinOp (UnOp (ToStringOp, e1), Equal, UnOp (ToStringOp, e2)) ->
         BinOp (e1, Equal, e2)
     (* BinOps: Equalities (locations) *)
+    | BinOp (LVar x, Equal, (ALoc l | Lit (Loc l)))
+    | BinOp ((ALoc l | Lit (Loc l)), Equal, LVar x)
+      when !Config.servpips_semantics && !servpips_input_not_loc x l ->
+        Expr.false_
     (* This line is the central mechanism to "matching": *)
     | BinOp (ALoc x, Equal, ALoc y) when not matching -> Lit (Bool (x = y))
     | BinOp (ALoc _, Equal, Lit (Loc _)) | BinOp (Lit (Loc _), Equal, ALoc _) ->

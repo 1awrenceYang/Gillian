@@ -967,3 +967,21 @@ module M = struct
     let sorted_locs = Containers.SS.elements (SHeap.domain smemory) in
     List.map (fun loc -> (loc, Option.get (SHeap.get smemory loc))) sorted_locs
 end
+
+(* SERVPIPS: a LazyJSON input value never aliases a program object. Its object
+   identity, if it is an object, is one of the locations allocated for its
+   classes at materialisation (ServpipsLazy.mat_aloc: fresh, once per (value,
+   class)); so [x == l] is false for a registered input [x] and any location
+   [l] that is not one of those. Without this, the equality with an existing
+   object is satisfiable and explores an infeasible aliasing branch (e.g. the
+   regenerator runtime compares every awaited value with its sentinel object;
+   on the aliasing branch its loop never terminates). *)
+let () =
+  Reduction.servpips_input_not_loc :=
+    fun x l ->
+      match ServpipsLazy.find x with
+      | None -> false
+      | Some _ -> (
+          match ServpipsLazy.owner_of_aloc l with
+          | Some (owner, _) -> owner <> x
+          | None -> true)

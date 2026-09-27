@@ -47,3 +47,9 @@ val is_tautology : ?pfs:PFS.t -> ?gamma:Type_env.t -> Gil_syntax.Expr.t -> bool
     different, [Some false] if syntactically equal, [None] if unknown (used in
     set reasoning; exported for the SERVPIPS unit tests). *)
 val is_different : Expr.t list -> Expr.t -> Expr.t -> bool option
+
+(** SERVPIPS: [!servpips_input_not_loc x l] means that [x == l] is false for
+    the logical variable [x] and the location [l] (installed by the target
+    language: an input value never aliases a program object). Used only under
+    [Config.servpips_semantics]. *)
+val servpips_input_not_loc : (string -> string -> bool) ref
