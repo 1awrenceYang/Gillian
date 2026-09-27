@@ -638,6 +638,7 @@ let set_remove heap loc key s =
 let lazykeys_key = "@sp_lazykeys"
 let written_key = "@sp_written"
 let deleted_key = "@sp_deleted"
+let hidden_key = "@sp_hidden"
 let symcells_key = "@sp_symcells"
 
 (* Path-private dirtiness of lazy values: a reserved object whose cells are
@@ -1058,11 +1059,61 @@ let get_cell_miss (ms : mstate) (al : string) (prop : Expr.t) : ret option =
 (* Writes (SetCell / DeleteCell hooks)                                      *)
 (* ------------------------------------------------------------------------ *)
 
+(** Names that the ES / Node algorithms the models derive from a pristine
+    lazy value read by name, whether or not the member is enumerable:
+    [toJSON] (JSON.stringify), [valueOf], [length], [buffer], [type],
+    [data] and indices (Buffer.from), [toString] / [valueOf] (ToPrimitive),
+    [then] (promise resolution), and the other names of [Object.prototype].
+    Defining a non-enumerable member with such a name is a visible write. *)
+let implicitly_read_names =
+  object_prototype_names @ [ "toJSON"; "then"; "length"; "buffer"; "type"; "data" ]
+
+(** Can a member named [k] be hidden (see [hidden_write])? *)
+let hideable_name (k : string) : bool =
+  k <> ""
+  && k.[0] <> '@'
+  && (not (is_index_form k))
+  && not (List.mem k implicitly_read_names)
+
+(** The enumerable attribute of a property descriptor stored in a cell
+    ([{{"d", v, w, e, c}}] or [{{"a", g, s, e, c}}]), when it is a literal. *)
+let desc_enumerable (d : Expr.t) : bool option =
+  match d with
+  | EList [ Lit (String ("d" | "a")); _; _; Lit (Bool e); _ ] -> Some e
+  | _ -> None
+
+(** Is the program write of [value] at the concrete key [k] of the lazy
+    object [al] (class [c]) {e hidden}: invisible to the enumerable own
+    properties and to the JSON text of the value? It is when [value] is a
+    descriptor with a literal [enumerable = false] (or a deletion) of a
+    member that the input value certainly does not have and that is either
+    new or already hidden: before the write, the cell is a LazyJSON
+    tombstone (a key excluded by a closed struct, a member found absent, ...;
+    not a key the program deleted), or there is no cell and the class admits
+    no member [k], or [k] is already hidden. The name must be hideable (not
+    an index, not read by name by the derivations above) and the class must
+    have no resolver (a view's own members are its resolver's business). For
+    example the non-enumerable [$response] that the v2 SDK model defines on
+    a response. *)
+let hidden_write (ms : mstate) (al : string) (c : class_spec) (k : string)
+    (value : Expr.t) : bool =
+  let hidden_already = List.mem k (string_set ms.heap al hidden_key) in
+  c.resolver = None && hideable_name k
+  && (match value with
+     | Lit Nono -> hidden_already
+     | _ -> desc_enumerable value = Some false)
+  && (hidden_already
+     ||
+     match cell ms.heap al (str k) with
+     | Some (Lit Nono) -> not (List.mem k (string_set ms.heap al deleted_key))
+     | None -> class_member c k = None
+     | Some _ -> false)
+
 let before_set_cell (ms : mstate) (al : string) (prop : Expr.t) (value : Expr.t) :
     unit =
   match owner_of_aloc al with
   | None -> ()
-  | Some (x, _) ->
+  | Some (x, i) ->
       let k =
         match reduce ms prop with
         | Lit (String k) -> k
@@ -1071,14 +1122,22 @@ let before_set_cell (ms : mstate) (al : string) (prop : Expr.t) (value : Expr.t)
       if meta_cell ms.heap al symcells_key <> None then
         unsupported "write to an input array after a symbolic-index read";
       set_remove ms.heap al lazykeys_key k;
-      (match value with
-      | Lit Nono ->
-          set_remove ms.heap al written_key k;
-          set_add ms.heap al deleted_key k
-      | _ ->
-          set_remove ms.heap al deleted_key k;
-          set_add ms.heap al written_key k);
-      mark_dirty ms.heap x
+      let c = (Hashtbl.find infos x).classes.(i) in
+      if hidden_write ms al c k value then (
+        (* not a visible write: the value stays pristine *)
+        match value with
+        | Lit Nono -> set_remove ms.heap al hidden_key k
+        | _ -> set_add ms.heap al hidden_key k)
+      else (
+        set_remove ms.heap al hidden_key k;
+        (match value with
+        | Lit Nono ->
+            set_remove ms.heap al written_key k;
+            set_add ms.heap al deleted_key k
+        | _ ->
+            set_remove ms.heap al deleted_key k;
+            set_add ms.heap al written_key k);
+        mark_dirty ms.heap x)
 
 (* ------------------------------------------------------------------------ *)
 (* Enumeration (GetAllProps hook)                                           *)
@@ -1189,14 +1248,29 @@ let closed_struct_enumeration (ms : mstate) (info : info) (i : int) (loc : strin
         (Printf.sprintf
            "enumeration of input object %s: more than %d members, order unknown"
            info.name max_enum_order_keys);
+    (* hidden members (non-enumerable, defined by the program: not input
+       members) were created after every member of the input: they stay
+       after the chosen order, in their own order *)
+    let hidden heap =
+      match SHeap.ordered_fields heap loc with
+      | Ok names ->
+          let hs = string_set heap loc hidden_key in
+          List.filter_map
+            (function
+              | Expr.Lit (String k) when List.mem k hs -> Some k
+              | _ -> None)
+            names
+      | Error _ -> []
+    in
     List.concat_map
       (fun (heap, facts, types) ->
         let perms = permutations (named heap) in
         let n = List.length perms in
+        let later = hidden heap in
         List.mapi
           (fun j perm ->
             let h = if j < n - 1 then SHeap.copy heap else heap in
-            SHeap.set_creation_order h loc (List.map str perm);
+            SHeap.set_creation_order h loc (List.map str (perm @ later));
             set_meta_cell h loc enumerated_key true_;
             (h, names h, facts, types))
           perms)
@@ -1852,7 +1926,19 @@ let x_member : ServpipsExterns.handler =
         [ ServpipsExterns.Return (st, v) ]);
   }
 
-(* __servpips_is_lazy(v, mode?) with mode "pristine" (default) or "any" *)
+(** The mode argument of [__servpips_is_lazy] / [__servpips_lazy_name]:
+    [true] for ["any"], [false] for ["pristine"] (the default) and its alias
+    ["json"]. *)
+let mode_any (type st vt) (module E : ServpipsExterns.ENV with type st = st and type vt = vt)
+    (what : string) (v : vt) ~(default : bool) : bool =
+  match E.Val.to_literal v with
+  | Some (String "any") -> true
+  | Some (String ("pristine" | "json")) -> false
+  | Some Undefined | None -> default
+  | _ -> unsupported (what ^ ": mode must be \"pristine\", \"json\" or \"any\"")
+
+(* __servpips_is_lazy(v, mode?) with mode "pristine" (default), its alias
+   "json", or "any" *)
 let x_is_lazy : ServpipsExterns.handler =
   {
     run =
@@ -1861,17 +1947,14 @@ let x_is_lazy : ServpipsExterns.handler =
            (state : st)
            (args : vt list) ->
         let env = (module E : ServpipsExterns.ENV with type st = st and type vt = vt) in
-        let any =
-          match E.Val.to_literal (nth_arg env args 1) with
-          | Some (String "any") -> true
-          | Some (String "pristine") | Some Undefined | None -> false
-          | _ -> unsupported "__servpips_is_lazy: mode must be \"pristine\" or \"any\""
-        in
+        let any = mode_any env "__servpips_is_lazy" (nth_arg env args 1) ~default:false in
         let b = Ext.is_lazy env state ~any (nth_arg env args 0) in
         [ ServpipsExterns.Return (state, E.Val.from_literal (Bool b)) ]);
   }
 
-(* __servpips_lazy_name(v): the name of a lazy value, or undefined *)
+(* __servpips_lazy_name(v, mode?): the name of a lazy value, or undefined;
+   with mode "pristine" / "json", the name only if the value is pristine
+   (one extern call for the models' derived constants, D-R3-1) *)
 let x_lazy_name : ServpipsExterns.handler =
   {
     run =
@@ -1880,10 +1963,13 @@ let x_lazy_name : ServpipsExterns.handler =
            (state : st)
            (args : vt list) ->
         let env = (module E : ServpipsExterns.ENV with type st = st and type vt = vt) in
+        let any = mode_any env "__servpips_lazy_name" (nth_arg env args 1) ~default:true in
+        let v = nth_arg env args 0 in
         let r =
-          match Ext.lazy_name env state (nth_arg env args 0) with
-          | Some s -> E.Val.from_literal (String s)
-          | None -> E.Val.from_literal Undefined
+          match Ext.lazy_name env state v with
+          | Some s when any || Ext.is_lazy env state ~any:false v ->
+              E.Val.from_literal (String s)
+          | _ -> E.Val.from_literal Undefined
         in
         [ ServpipsExterns.Return (state, r) ]);
   }

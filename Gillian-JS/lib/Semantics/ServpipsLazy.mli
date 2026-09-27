@@ -68,6 +68,25 @@
     (object metadata, and the reserved object [$lsp_lazy_state] for
     dirtiness), so it is copied with the state and is private to a path.
 
+    {b Hidden members.} A program write that is invisible to the enumerable
+    own properties and to the JSON text of the value does not make it dirty:
+    the definition with a literal [enumerable = false] (data or accessor
+    descriptor) of a member the input certainly does not have, or the
+    redefinition or deletion of such a member. "Certainly does not have": the
+    cell is a LazyJSON tombstone that is not a program deletion (a key
+    excluded by a closed struct, a member found absent, ...), or there is no
+    cell and the class admits no member of that name. Only objects of
+    classes without a resolver, and only names that are not indices and not
+    read by name by the algorithms the models derive from pristine values
+    ([toJSON], [then], [length], [buffer], [type], [data] and the names of
+    [Object.prototype]). Such keys are kept in the metadata set
+    [@sp_hidden]: they are own properties (GetAllProps lists them, after
+    the input's members), but they are neither written nor deleted keys of
+    the value tree. Example: the non-enumerable [$response] the v2 SDK model
+    defines on a response object, so that [JSON.stringify(response)] still
+    has the shared constant. Any other write to a hidden key makes it a
+    written key.
+
     {b Enumeration} ([GetAllProps]) of an open lazy JSON object, of a view,
     or of any object whose metadata has [@sp_open] set: [unsupported]. A
     lazy array whose length is concrete is enumerated exactly (its missing
@@ -107,9 +126,13 @@
       first arguments must be string literals; [classes] is [undefined] or a
       JS array). Emits the root [decl].
     - [SpMember(x, key)] -> [[child]]
-    - [SpIsLazy(v, "pristine"|"any")] -> [[bool]]: [v] is a lazy value (an
-      lvar or a materialised object) and, for ["pristine"], neither it nor
-      any descendant was written on this path.
+    - [SpIsLazy(v, "pristine"|"json"|"any")] -> [[bool]]: [v] is a lazy
+      value (an lvar, materialised or not, of any type, or a materialised
+      object) and, for ["pristine"] (alias ["json"]), neither it nor any
+      descendant has a visible program write on this path (hidden members
+      do not count): its JSON text, enumerable own properties and the
+      results of the derivations listed under "Hidden members" are those of
+      the input. No materialisation, no solver call.
     - [SpLazyName(v)] -> [[name | undefined]]
     - [SpSerialize(v)] -> [[id]]: value tree of [v] (E17, see
       {!ServpipsValue}); fetch it with {!take_serialized}.
@@ -132,10 +155,12 @@
     {1 Externs registered here}
 
     [servpips_lazy], [servpips_member], [servpips_is_lazy] (optional second
-    argument ["pristine"] (default) or ["any"]), [servpips_shapes], and the
-    additions [servpips_lazy_name(v)] (name string or [undefined]) and
-    [servpips_put_prepare(o, key)] (runtime hook of the JSIL [put]; a no-op
-    unless a lazy value was registered). *)
+    argument ["pristine"] (default), its alias ["json"], or ["any"]),
+    [servpips_shapes], and the additions [servpips_lazy_name(v, mode?)]
+    (name string or [undefined]; with mode ["pristine"] / ["json"] the name
+    only if the value is pristine: one call for the models' derived
+    constants) and [servpips_put_prepare(o, key)] (runtime hook of the JSIL
+    [put]; a no-op unless a lazy value was registered). *)
 
 open Gillian.Gil_syntax
 module PFS = Gillian.Symbolic.Pure_context
@@ -239,7 +264,8 @@ val materialize_loc : mstate -> Expr.t -> branch list option
 (** [GetCell] miss on a lazy object ([None]: not a LazyJSON object). *)
 val get_cell_miss : mstate -> string -> Expr.t -> ret option
 
-(** Bookkeeping before a [SetCell] (value [none] = delete). *)
+(** Bookkeeping before a [SetCell] (value [none] = delete): see "Writes"
+    and "Hidden members" above. *)
 val before_set_cell : mstate -> string -> Expr.t -> Expr.t -> unit
 
 (** [GetAllProps] hook: [Some branches] (heap, names, new facts, new types)
@@ -283,6 +309,7 @@ val class_member : class_spec -> string -> (Yojson.Safe.t * bool) option
 val lazykeys_key : string
 val written_key : string
 val deleted_key : string
+val hidden_key : string
 
 (** {1 Memory action names} *)
 
