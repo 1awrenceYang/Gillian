@@ -172,7 +172,11 @@ module Infer_types_to_gamma = struct
         | Some spec ->
             tt = spec.ret
             && List_utils.lengths_eq spec.args les
-            && List.for_all2 f les spec.args
+            && List.for_all2
+                 (fun le -> function
+                   | Some t -> f le t
+                   | None -> true (* any type *))
+                 les spec.args
         | None -> false)
     | FuncApp (n, les) -> (
         match Function_env.get_function_param_types n with
@@ -547,7 +551,7 @@ module Type_lexpr = struct
     | Some spec ->
         (* SERVPIPS builtin: typable iff the arguments have the parameter
            types; the result type is known *)
-        let tts = List.map Option.some spec.args in
+        let tts = spec.args (* None: any type *) in
         if
           List_utils.lengths_eq tts les
           && typable_list gamma ?target_types:(Some tts) les
