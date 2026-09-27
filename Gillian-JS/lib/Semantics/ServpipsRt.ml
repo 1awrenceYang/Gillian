@@ -132,7 +132,6 @@ let json_opt_string = function
   | Some s -> `String s
 
 (* Numbers used by the arithmetic rules *)
-let two52 = 4503599627370496.
 let two53 = 9007199254740992.
 let two26 = 67108864.
 
@@ -1281,11 +1280,11 @@ module Make (E : X.ENV) = struct
                   BinOp (e, FLessThan, num bound);
                 ]
               in
-              (* an integer literal operand c (|c| <= 2^53) allows the
-                 other integer operand up to 2^53 - |c| (+, -) or
-                 2^53 / |c| ( * ): the exact result is an integer of
-                 magnitude <= 2^53, hence a double (the converter's
-                 guards for inexact arithmetic are the same) *)
+              (* ( * ) an integer literal operand c (|c| <= 2^53) allows
+                 the other integer operand up to 2^53 / |c|: the exact
+                 result is an integer of magnitude <= 2^53, hence a double
+                 (the converter's guards for inexact arithmetic are the
+                 same) *)
               let int_lit = function
                 | Some f when Float.is_integer f && Float.abs f <= two53 ->
                     Some (Float.abs f)
@@ -1298,14 +1297,12 @@ module Make (E : X.ENV) = struct
                   BinOp (e, FLessThanEqual, num bound);
                 ]
               in
-              let with_literal ~add =
+              let with_literal () =
                 match (int_lit la, int_lit lb) with
                 | Some c, _ | _, Some c ->
                     let other = if int_lit la <> None then eb else ea in
                     let bound =
-                      if add then two53 -. c
-                      else if c = 0. then two53
-                      else Float.floor (two53 /. c)
+                      if c = 0. then two53 else Float.floor (two53 /. c)
                     in
                     entails st (int_le bound other)
                 | None, None -> false
@@ -1313,11 +1310,21 @@ module Make (E : X.ENV) = struct
               let exact_ok =
                 match op with
                 | "+" | "-" ->
-                    entails st (int_in two52 ea @ int_in two52 eb)
-                    || with_literal ~add:true
+                    (* round 3: integer operands whose exact sum /
+                       difference has magnitude <= 2^53 (an integer double:
+                       IEEE addition is correctly rounded, so the result is
+                       exact); subsumes |a|, |b| < 2^52 and the literal
+                       rule *)
+                    entails st
+                      [
+                        Expr.UnOp (IsInt, ea);
+                        UnOp (IsInt, eb);
+                        BinOp (num (-.two53), FLessThanEqual, exact);
+                        BinOp (exact, FLessThanEqual, num two53);
+                      ]
                 | "*" ->
                     entails st (int_in two26 ea @ int_in two26 eb)
-                    || with_literal ~add:false
+                    || with_literal ()
                 | "%" -> entails st [ UnOp (IsInt, ea); UnOp (IsInt, eb) ]
                 | "/" -> (
                     match lb with

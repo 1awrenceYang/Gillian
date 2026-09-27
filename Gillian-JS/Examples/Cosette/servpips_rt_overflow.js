@@ -4,8 +4,9 @@
    (fail closed) and continues with the finite havoc value only; there are
    no +/-Infinity branches. Sound range facts (as the models assume them for
    Math.random, lengths, Date.now, DynamoDB numbers) make the overflow
-   unsatisfiable: no unsupported end. Exactness with an integer literal
-   operand: |x| <= 2^53 - |c| (+, -) and |x| <= 2^53 / |c| (*). */
+   unsatisfiable: no unsupported end. Exactness: integer operands of + / -
+   whose exact result has magnitude <= 2^53; for *, an integer literal
+   operand c and |x| <= 2^53 / |c|. */
 var c = __servpips_fresh("case", "Num", "input");
 var x = __servpips_fresh("x", "Num", "input");
 var y = __servpips_fresh("y", "Num", "input");
@@ -49,4 +50,18 @@ if (c === 0) {
   /* a chain of unbounded products stays linear: one arith-overflow end per
      operation, one continuing path */
   show("chain", x * y * x * y * x);
+} else if (c === 6) {
+  /* +/- exactness (round 3): integer operands whose exact result has
+     magnitude <= 2^53. Two Date.now()-like timestamps t0, t1 (integers in
+     [0, 8.64e15], stated with the order builtins, no fork): t1 - t0 and
+     (t1 - t0) + 5 are exact (the operands exceed 2^52), t1 + t0 (up to
+     1.728e16) is havoc without overflow */
+  __servpips_assume(__servpips_fn("and", __servpips_fn("is_int", x), __servpips_fn("<=", 0, x),
+                                  __servpips_fn("<=", x, 8640000000000000)));
+  __servpips_assume(__servpips_fn("and", __servpips_fn("is_int", y), __servpips_fn("<=", 0, y),
+                                  __servpips_fn("<=", y, 8640000000000000)));
+  var dt = y - x;
+  show("t1-t0", dt);
+  show("t1-t0+5", dt + 5);
+  show("t1+t0", y + x);
 }
