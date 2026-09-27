@@ -281,9 +281,18 @@ let make_empty_ass () =
   let empty_ass = LBasic (Assignment (x, Lit Empty)) in
   (x, empty_ass)
 
-let make_create_function_object_call x_sc fun_id params =
+(* SERVPIPS: with the SERVPIPS semantics, [?sp_name] (the function's own
+   name, "" for an anonymous function expression) is passed to
+   create_function_object, which defines the ES2015 own property [name]
+   (9.2.11 SetFunctionName: non-writable, non-enumerable, configurable) *)
+let make_create_function_object_call ?sp_name x_sc fun_id params =
   let x_f = fresh_fun_var () in
   let processed_params = List.map (fun p -> Literal.String p) params in
+  let sp_name_arg =
+    match sp_name with
+    | Some n when !Gillian.Utils.Config.servpips_semantics -> [ Lit (String n) ]
+    | _ -> []
+  in
   let cmd =
     LCall
       ( x_f,
@@ -293,7 +302,8 @@ let make_create_function_object_call x_sc fun_id params =
           Lit (String fun_id);
           Lit (String fun_id);
           Lit (LList processed_params);
-        ],
+        ]
+        @ sp_name_arg,
         None,
         None )
   in
@@ -307,7 +317,9 @@ let translate_named_function_literal
     params
     index =
   (* x_f := create_function_object(x_sc, f_id, f_id, params) *)
-  let x_f, cmd_cfoc = make_create_function_object_call x_sc f_id params in
+  let x_f, cmd_cfoc =
+    make_create_function_object_call ~sp_name:f_name x_sc f_id params
+  in
   let cmd_cfoc = (None, cmd_cfoc) in
 
   (* x_er := l-nth(x_sc, index) *)
@@ -4336,7 +4348,8 @@ let rec translate_expr tr_ctx e :
                 respective code names")
       in
       let x_f, cmd =
-        make_create_function_object_call tr_ctx.tr_sc_var f_id params
+        make_create_function_object_call ~sp_name:"" tr_ctx.tr_sc_var f_id
+          params
       in
       let cmds = annotate_first_cmd [ annotate_cmd cmd None ] in
       (cmds, PVar x_f, [])
@@ -4387,7 +4400,7 @@ let rec translate_expr tr_ctx e :
 
       (* x_f := create_function_object(x_sc_f, f_id, params) *)
       let x_f, cmd_fun_constr =
-        make_create_function_object_call x_sc_f f_id params
+        make_create_function_object_call ~sp_name:f_name x_sc_f f_id params
       in
 
       (* [x_f_outer_er, f] := x_f *)

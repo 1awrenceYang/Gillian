@@ -119,9 +119,15 @@ proc create_object_with_call_construct_concrete (l, call, construct, len, opt_pr
 
 	Does not thrw an error
 *)
-proc create_function_object (xsc, call, construct, params) {
+(* SERVPIPS: [sp_name] (passed by the compiler with the SERVPIPS semantics,
+   undefined otherwise) is the ES2015 own property name of the function
+   (9.2.11 SetFunctionName; right after length, as in V8) *)
+proc create_function_object (xsc, call, construct, params, sp_name) {
             len := l-len(params);
 			ret := "create_object_with_call_construct" (call, construct, len);
+			goto [sp_name = undefined] spn0 spn1;
+	spn1:	[ret, "name"] := {{ "d", sp_name, false, false, true }};
+	spn0:	skip;
 
              m := metadata(ret);
 			[m, "@scope"] := xsc;
