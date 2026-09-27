@@ -13,7 +13,13 @@ type tbl = (string, Type.t) Hashtbl.t [@@deriving yojson]
    order): two environments with the same stamp have the same bindings in the
    same iteration order (see [generation]). The JSON form is the table's, as
    before. *)
-type t = { tbl : tbl; mutable gen : int }
+type t = {
+  tbl : tbl;
+  mutable gen : int;
+  mutable src : (Var.t * Type.t) list option;
+      (** SERVPIPS: the list the table was last [reset] from, while it has
+          not been modified since (a reset from an equal list is a no-op) *)
+}
 
 let stamp_counter = ref 0
 
@@ -21,13 +27,15 @@ let fresh_stamp () =
   incr stamp_counter;
   !stamp_counter
 
-let mk tbl = { tbl; gen = fresh_stamp () }
+let mk tbl = { tbl; gen = fresh_stamp (); src = None }
 let to_yojson (x : t) = tbl_to_yojson x.tbl
 let of_yojson j = Result.map mk (tbl_of_yojson j)
 let as_hashtbl x = x.tbl
 let generation (x : t) = x.gen
 let servpips_set_generation (x : t) (g : int) = x.gen <- g
-let touch (x : t) = x.gen <- fresh_stamp ()
+let touch (x : t) =
+  x.gen <- fresh_stamp ();
+  x.src <- None
 
 (*************************************)
 (** Typing Environment Functions **)
@@ -38,7 +46,7 @@ let touch (x : t) = x.gen <- fresh_stamp ()
 let init () : t = mk (Hashtbl.create Config.medium_tbl_size)
 
 (* Copy *)
-let copy (x : t) : t = { tbl = Hashtbl.copy x.tbl; gen = x.gen }
+let copy (x : t) : t = { tbl = Hashtbl.copy x.tbl; gen = x.gen; src = x.src }
 
 (* Type of a variable *)
 let get (x : t) (var : string) : Type.t option = Hashtbl.find_opt x.tbl var
@@ -182,9 +190,19 @@ let to_list (x : t) : (Var.t * Type.t) list =
   le_type_pairs
 
 let reset (x : t) (reset : (Var.t * Type.t) list) =
-  Hashtbl.clear x.tbl;
-  List.iter (fun (y, t) -> Hashtbl.replace x.tbl y t) reset;
-  touch x
+  match x.src with
+  | Some l
+    when !Config.servpips_semantics
+         && List.equal (fun a b -> a == b || a = b) l reset ->
+      (* SERVPIPS (E19): the table is the result of a reset from an equal
+         list, not modified since (a copy keeps the table's structure): the
+         same reset would rebuild the same table *)
+      ()
+  | _ ->
+      Hashtbl.clear x.tbl;
+      List.iter (fun (y, t) -> Hashtbl.replace x.tbl y t) reset;
+      touch x;
+      if !Config.servpips_semantics then x.src <- Some reset
 
 let is_well_formed (_ : t) : bool = true
 
