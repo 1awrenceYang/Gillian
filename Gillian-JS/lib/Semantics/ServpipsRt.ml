@@ -207,6 +207,11 @@ module Make (E : X.ENV) = struct
 
   let nono v = V.to_literal v = Some Literal.Nono
 
+  (* A memory action with several results may have modified the input state
+     in place (one branch reuses the input heap: closed-structure
+     enumeration, symbolic GetCell, GetAllProps, lazy materialisation), so the
+     caller must not continue with [st]: such a result ends the path
+     unsupported (fail closed) instead of answering "unknown". *)
   let action1 name (st : st) (args : vt list) : (st * vt list) option =
     let res =
       try S.execute_action name st args with
@@ -215,6 +220,9 @@ module Make (E : X.ENV) = struct
     in
     match res with
     | [ Ok (st', vs) ] -> Some (st', vs)
+    | _ :: _ :: _ ->
+        fail_uns "memory action %s with %d results (%s)" name (List.length res)
+          (String.concat ", " (List.map pp_v args))
     | _ -> None
 
   let get_cell_v st loc (prop : vt) : (st * vt option) option =
@@ -1621,6 +1629,12 @@ let hook_action (type st vt)
   in
   match res with
   | [ Ok (st', vs) ] -> Some (st', vs)
+  | _ :: _ :: _ ->
+      (* see [action1]: the input state may have been modified in place *)
+      path_end "unsupported"
+        (Printf.sprintf "runtime hook: memory action %s with %d results (%s)"
+           name (List.length res)
+           (String.concat ", " (List.map (Fmt.to_to_string E.Val.pp) args)))
   | _ -> None
 
 type 'vt meta_read = Meta_absent | Meta_value of 'vt | Meta_unknown
