@@ -540,11 +540,7 @@ module Make (SMemory : SMemory.S) :
       @ [ Types (Type_env.to_list_expr gamma) ]
 
   let servpips_pc ({ pfs; gamma; _ } : t) =
-    let types =
-      Type_env.to_list_expr gamma
-      |> List.sort (fun (e1, _) (e2, _) -> Expr.compare e1 e2)
-    in
-    (PFS.to_list pfs, types)
+    (PFS.to_list pfs, Type_env.to_list_expr gamma)
 
   let evaluate_slcmd (_ : 'a MP.prog) (_ : SLCmd.t) (_ : t) :
       (t, err_t) Res_list.t =

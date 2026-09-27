@@ -76,6 +76,8 @@ let expr_json (e : Expr.t) : Yojson.Safe.t =
 let pc_json (pc : Expr.t list) : Yojson.Safe.t = `List (List.map expr_json pc)
 
 let types_json (types : (Expr.t * Type.t) list) : Yojson.Safe.t =
+  (* sorted, for deterministic output *)
+  let types = List.sort (fun (e1, _) (e2, _) -> Expr.compare e1 e2) types in
   `List (List.map (fun (e, t) -> `List [ expr_json e; `String (Type.str t) ]) types)
 
 exception Path_end of { status : string; reason : string }
@@ -277,8 +279,23 @@ let end_path ~status ~reason ?outcome () =
 let last_decision = ref "solver"
 let set_decision (by : string) = last_decision := by
 
-(* prune events, deduplicated on their exact content *)
-let prune_seen : (Digest.t, unit) Hashtbl.t = Hashtbl.create 1024
+(* prune events, deduplicated on their exact content (structural key, hashed
+   over every component so that keys sharing a prefix do not collide) *)
+module Prune_key = struct
+  type t = Expr.t * Expr.t * string * string * Expr.t list * (Expr.t * Type.t) list
+
+  let equal (a : t) (b : t) = compare a b = 0
+
+  let hash ((g, go, kept, by, pc, types) : t) =
+    let mix h x = (h * 65599) + Hashtbl.hash x in
+    let h = List.fold_left mix (mix (mix 17 g) go) pc in
+    let h = List.fold_left mix h types in
+    mix h (kept, by) land max_int
+end
+
+module Prune_tbl = Hashtbl.Make (Prune_key)
+
+let prune_seen : unit Prune_tbl.t = Prune_tbl.create 1024
 
 (* The part of a path condition relevant to a set of variables: the
    conjuncts connected to [vars] through shared logical variables or abstract
@@ -309,6 +326,7 @@ let pc_slice ~(vars : SS.t) (pc : Expr.t list) (types : (Expr.t * Type.t) list)
         | LVar x | ALoc x -> SS.mem x rel
         | _ -> false)
       types
+    |> List.sort (fun (e1, _) (e2, _) -> Expr.compare e1 e2)
   in
   (pc', types')
 
@@ -322,31 +340,23 @@ let record_prune ~guard ~guard_orig ~kept ~by ~pc ~types () =
         ]
     in
     let pc, types = pc_slice ~vars pc types in
-    let j =
-      `Assoc
-        [
-          ("ev", `String "prune");
-          ("guard", expr_json guard);
-          ("guard_orig", expr_json guard_orig);
-          ("kept", `String kept);
-          ("by", `String by);
-          ("pc", pc_json pc);
-          ("types", types_json types);
-        ]
-    in
-    let line = Yojson.Safe.to_string (encode_nonfinite j) in
-    let d = Digest.string line in
-    if Hashtbl.mem prune_seen d then
+    let key = (guard, guard_orig, kept, by, pc, types) in
+    if Prune_tbl.mem prune_seen key then
       counters.prunes_dup <- counters.prunes_dup + 1
     else (
-      Hashtbl.replace prune_seen d ();
+      Prune_tbl.replace prune_seen key ();
       counters.prunes <- counters.prunes + 1;
-      match !chan with
-      | None -> ()
-      | Some oc ->
-          output_string oc line;
-          output_char oc '\n';
-          flush oc)
+      emit
+        (`Assoc
+          [
+            ("ev", `String "prune");
+            ("guard", expr_json guard);
+            ("guard_orig", expr_json guard_orig);
+            ("kept", `String kept);
+            ("by", `String by);
+            ("pc", pc_json pc);
+            ("types", types_json types);
+          ]))
 
 let note_unknown ~entailment =
   if entailment then (
