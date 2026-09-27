@@ -69,8 +69,7 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
     if depth > max_depth then opaque "depth"
     else
       match classify v with
-      | `Lazy_unmat (info : SL.info) ->
-          lazy_node ~lvar:info.lvar ~aloc:None ~written:[] ~deleted:[]
+      | `Lazy_unmat (info : SL.info) -> lazy_unmat depth seen info
       | `Loc l ->
           if List.mem l seen then opaque "cycle"
           else if not (SHeap.has_loc heap l) then opaque "model:missing"
@@ -211,12 +210,40 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
               ("len", Servpips.expr_json e);
             ]
     with Opaque w -> opaque w
+  (* Lazily created members whose value was written on this path (their
+     tree carries the nested writes). Children read through a symbolic
+     index cannot be placed: the node is then opaque. [cls]: the class of
+     the object on this path, if materialised. *)
+  and dirty_children depth seen (x : string) ~(skip : string list)
+      ~(cls : SL.class_spec option) : (string * J.t) list =
+    List.filter_map
+      (fun (k, c) ->
+        if not (SL.is_dirty heap c) then None
+        else
+          match k with
+          | None -> raise (Opaque "model:symbolic-index-write")
+          | Some k when List.mem k skip -> None
+          | Some k -> (
+              (match cls with
+              | Some cls when SL.class_member cls k = None ->
+                  raise (Opaque "model:inconsistent-member")
+              | _ -> ());
+              Some (k, vt (depth + 1) seen (Expr.LVar c))))
+      (SL.children_list x)
+  and lazy_unmat depth seen (info : SL.info) : J.t =
+    try
+      let written =
+        if SL.is_dirty heap info.lvar then
+          dirty_children depth seen info.lvar ~skip:[] ~cls:None
+        else []
+      in
+      lazy_node ~lvar:info.lvar ~aloc:None ~written ~deleted:[]
+    with Opaque w -> opaque w
   and lazy_obj depth seen (x : string) (l : string) : J.t =
     try
       let set k = SL.string_set heap l k in
       let written_keys = set SL.written_key in
       let deleted = set SL.deleted_key in
-      let lazykeys = set SL.lazykeys_key in
       let order, _ = split_fields heap l in
       let ordered keys = List.filter (fun k -> List.mem k keys) order in
       let written =
@@ -236,20 +263,20 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
           (fun k -> not (List.mem_assoc k written))
           (ordered written_keys)
       in
-      (* lazily created members whose (lazy) value was modified *)
-      let dirty_children =
-        List.filter_map
-          (fun k ->
-            match SL.cell heap l (SL.str k) with
-            | Some (EList [ Lit (String "d"); cv; _; _; _ ]) -> (
-                match SL.lazy_of_value ms cv with
-                | Some (ci, _) when SL.is_dirty heap ci.lvar ->
-                    Some (k, vt (depth + 1) seen cv)
-                | _ -> None)
-            | _ -> None)
-          (ordered lazykeys)
+      let cls =
+        match SL.owner_of_aloc l with
+        | Some (x', i) when x' = x -> (
+            match SL.find x with
+            | Some info -> Some info.classes.(i)
+            | None -> None)
+        | _ -> None
       in
-      lazy_node ~lvar:x ~aloc:(Some l) ~written:(written @ dirty_children)
+      let dirty =
+        if SL.is_dirty heap x then
+          dirty_children depth seen x ~skip:(written_keys @ deleted) ~cls
+        else []
+      in
+      lazy_node ~lvar:x ~aloc:(Some l) ~written:(written @ dirty)
         ~deleted:(List.sort_uniq String.compare (deleted @ hidden))
     with Opaque w -> opaque w
   in

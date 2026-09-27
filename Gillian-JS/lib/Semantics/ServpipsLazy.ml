@@ -455,6 +455,18 @@ type info = {
 
 let infos : (string, info) Hashtbl.t = Hashtbl.create 256
 let children : (string * string, string) Hashtbl.t = Hashtbl.create 256
+
+(** All children of a lazy value: (key, child lvar); key [None] for the
+    arbitrary elements of an array. *)
+let children_of : (string, (string option * string) list) Hashtbl.t =
+  Hashtbl.create 256
+
+let add_child_of (parent : string) (key : string option) (child : string) =
+  let l = Option.value ~default:[] (Hashtbl.find_opt children_of parent) in
+  Hashtbl.replace children_of parent ((key, child) :: l)
+
+let children_list (parent : string) : (string option * string) list =
+  List.rev (Option.value ~default:[] (Hashtbl.find_opt children_of parent))
 let mat_alocs : (string * int, string * string) Hashtbl.t = Hashtbl.create 256
 let aloc_owner : (string, string * int) Hashtbl.t = Hashtbl.create 256
 let len_vars : (string, string) Hashtbl.t = Hashtbl.create 64
@@ -701,6 +713,7 @@ let get_child ?parent_aloc (info : info) (k : string) : info =
           ~parent:(Some (info.lvar, Some k)) ()
       in
       Hashtbl.replace children (info.lvar, k) child.lvar;
+      add_child_of info.lvar (Some k) child.lvar;
       decl_info ?parent_aloc child;
       child
 
@@ -980,6 +993,7 @@ let symbolic_access (ms : mstate) (info : info) (i : int) (al : string)
               ~parent:(Some (info.lvar, None)) ()
           in
           decl_info ~parent_aloc:al e;
+          add_child_of info.lvar None e.lvar;
           let facts, types = mask_facts ms e in
           let loc = loc_expr al in
           let h1 = SHeap.copy ms.heap and h2 = ms.heap in

@@ -225,6 +225,12 @@ val string_set : SHeap.t -> string -> string -> string list
 val loc_name_of : mstate -> Expr.t -> string option
 val lazy_of_value : mstate -> Expr.t -> (info * (string * int) option) option
 val is_dirty : SHeap.t -> string -> bool
+
+(** Children of a lazy value in creation order: (key, child lvar), key
+    [None] for arbitrary array elements. *)
+val children_list : string -> (string option * string) list
+
+val class_member : class_spec -> string -> (Yojson.Safe.t * bool) option
 val lazykeys_key : string
 val written_key : string
 val deleted_key : string
