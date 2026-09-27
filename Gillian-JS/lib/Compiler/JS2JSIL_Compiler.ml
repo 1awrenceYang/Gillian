@@ -381,6 +381,21 @@ let servpips_site_of_loc (loc : JS_Parser.Loc.t) : string =
     before it calls the arithmetic helpers below). *)
 let servpips_arith_site : string ref = ref "(none)"
 
+(** The [__servpips_pos("<site>", E)] whose E is being compiled: the original
+    source position given by the frontend and E itself (compared physically,
+    so only E's own operation takes it). *)
+let servpips_pos_pending : (string * JS_Parser.Syntax.exp) option ref =
+  ref None
+
+(** The site of the arithmetic operation [e] at [loc]: the frontend's original
+    position when [e] is the E of an enclosing [__servpips_pos], otherwise the
+    position of [e] in the compiled file. *)
+let servpips_node_site (e : JS_Parser.Syntax.exp) (loc : JS_Parser.Loc.t) :
+    string =
+  match !servpips_pos_pending with
+  | Some (site, target) when target == e -> site
+  | _ -> servpips_site_of_loc loc
+
 let servpips_arith_op_name (op : BinOp.t) : string =
   match op with
   | FPlus -> "+"
@@ -956,6 +971,8 @@ let rec translate_expr tr_ctx e :
 
   (* All the other commands must get the offsets and nothing else *)
   let js_loc = e.JS_Parser.Syntax.exp_loc in
+  (* SERVPIPS: the node itself (the match cases below shadow [e]) *)
+  let sp_node = e in
   let metadata : Annot.Basic.t =
     Annot.Basic.make_basic
       ~origin_loc:(JS_Utils.lift_flow_loc js_loc)
@@ -2431,6 +2448,39 @@ let rec translate_expr tr_ctx e :
       | [ _; _ ] -> fail "the first argument must be a string literal"
       | _ -> fail "expected exactly two arguments")
   | JS_Parser.Syntax.Call
+      ({ JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var "__servpips_pos"; _ }, xes)
+    -> (
+      (* SERVPIPS [__servpips_pos("<site>", E)] (interface I5): the value is
+         the value of E, compiled as E; when E is an arithmetic operation
+         (binary + - * / %, compound assignment, ++ / --) its servpips_arith
+         site is "<site>" (the original source position, given by the
+         frontend) instead of E's position in the compiled file. The first
+         argument must be a string literal and there must be exactly two
+         arguments (compile error otherwise). *)
+      let fail msg =
+        raise
+          (Failure
+             (Printf.sprintf "SERVPIPS: __servpips_pos at %s: %s"
+                (servpips_site_of_loc js_loc)
+                msg))
+      in
+      servpips_forms_used := true;
+      match xes with
+      | [ { JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.String site; _ }; target ]
+        ->
+          let saved = !servpips_pos_pending in
+          servpips_pos_pending := Some (site, target);
+          let result =
+            try translate_expr tr_ctx target
+            with exn ->
+              servpips_pos_pending := saved;
+              raise exn
+          in
+          servpips_pos_pending := saved;
+          result
+      | [ _; _ ] -> fail "the first argument must be a string literal"
+      | _ -> fail "expected exactly two arguments")
+  | JS_Parser.Syntax.Call
       ({ JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var "__servpips_strict"; _ }, [])
     ->
       (* SERVPIPS [__servpips_strict()] (E10-strict): the strictness of the
@@ -2852,7 +2902,7 @@ let rec translate_expr tr_ctx e :
      *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, x_v, _ =
-        (servpips_arith_site := servpips_site_of_loc js_loc;
+        (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_inc_dec x true tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
@@ -2872,7 +2922,7 @@ let rec translate_expr tr_ctx e :
      *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, x_v, _ =
-        (servpips_arith_site := servpips_site_of_loc js_loc;
+        (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_inc_dec x false tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
@@ -3084,7 +3134,7 @@ let rec translate_expr tr_ctx e :
      *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, _, x_r =
-        (servpips_arith_site := servpips_site_of_loc js_loc;
+        (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_inc_dec x true tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
@@ -3102,7 +3152,7 @@ let rec translate_expr tr_ctx e :
        *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, _, x_r =
-        (servpips_arith_site := servpips_site_of_loc js_loc;
+        (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_inc_dec x false tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
@@ -3275,7 +3325,7 @@ let rec translate_expr tr_ctx e :
       in
 
       let new_cmds, new_errs, x_r =
-        (servpips_arith_site := servpips_site_of_loc js_loc;
+        (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_multiplicative_binop x1 x2 x1_v x2_v aop tr_ctx.tr_err_lab)
       in
       let cmds =
@@ -3321,7 +3371,7 @@ let rec translate_expr tr_ctx e :
       in
 
       let new_cmds, new_errs, x_r =
-        (servpips_arith_site := servpips_site_of_loc js_loc;
+        (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_binop_plus x1 x2 x1_v x2_v tr_ctx.tr_err_lab)
       in
       let cmds =
@@ -4152,13 +4202,13 @@ let rec translate_expr tr_ctx e :
       let new_cmds, new_errs, x_r =
         match op with
         | JS_Parser.Syntax.Plus ->
-            (servpips_arith_site := servpips_site_of_loc js_loc;
+            (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_binop_plus x1 x2 x1_v x2_v tr_ctx.tr_err_lab)
         | JS_Parser.Syntax.Minus
         | JS_Parser.Syntax.Times
         | JS_Parser.Syntax.Div
         | JS_Parser.Syntax.Mod ->
-            (servpips_arith_site := servpips_site_of_loc js_loc;
+            (servpips_arith_site := servpips_node_site sp_node js_loc;
          translate_multiplicative_binop x1 x2 x1_v x2_v op tr_ctx.tr_err_lab)
         | JS_Parser.Syntax.Ursh ->
             translate_bitwise_shift x1 x2 x1_v x2_v toUInt32Name toUInt32Name
