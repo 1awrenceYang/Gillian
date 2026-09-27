@@ -238,12 +238,14 @@ let shape_of_id (id : string) : J.t =
       if List.mem id builtin_shape_ids then `Assoc [ ("type", `String id) ]
       else unsupported ("unknown shape id " ^ id)
 
-(** The label of a (member) shape for [decl.shape]: the id of a reference, or
-    the inline shape itself. *)
+(** The label of a (member) shape for [decl.shape]: the id of a bare
+    reference [{"ref": id}], otherwise the shape object itself (e.g.
+    [{"ref": id, "optional": true}] or an inline shape), so that the
+    optionality of a member is never lost. *)
 let shape_label (s : J.t) : J.t =
-  match str_field "ref" s with
-  | Some id -> `String id
-  | None -> s
+  match (s, str_field "ref" s) with
+  | `Assoc [ ("ref", _) ], Some id -> `String id
+  | _ -> s
 
 let type_of (s : J.t) : string =
   match str_field "type" s with
