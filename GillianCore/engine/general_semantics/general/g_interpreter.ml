@@ -505,7 +505,7 @@ struct
       | exception ((Stack_overflow | Out_of_memory | Sys.Break) as e) ->
           raise e
       | exception e ->
-          let msg = Printexc.to_string e in
+          let msg = Servpips.exn_msg e in
           Servpips.internal_exception ~msg;
           Servpips.record_end ~status:"error"
             ~reason:("audit: exception: " ^ msg)
@@ -1909,7 +1909,7 @@ struct
             | exception ((Stack_overflow | Out_of_memory | Sys.Break) as e) ->
                 raise e
             | exception e ->
-                let msg = Printexc.to_string e in
+                let msg = Servpips.exn_msg e in
                 Servpips.internal_exception ~msg;
                 servpips_end state ~status:"error"
                   ~reason:("exception in simplification: " ^ msg)
@@ -1976,7 +1976,7 @@ struct
         | e when sp ->
             (* SERVPIPS (E3): any other exception ends this configuration
                only; sibling configurations continue. *)
-            let msg = Printexc.to_string e in
+            let msg = Servpips.exn_msg e in
             let status =
               if servpips_unsupported_msg msg then "unsupported" else "error"
             in

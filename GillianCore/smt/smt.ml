@@ -1617,6 +1617,7 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
     if !servpips_mode then
       try encode_assertions fs gamma with
       | (Out_of_memory | Stack_overflow | Sys.Break) as e -> raise e
+      | Failure m | SMT_error m -> raise (SMT_encoding_failure m)
       | e -> raise (SMT_encoding_failure (Printexc.to_string e))
     else encode_assertions fs gamma
   in

@@ -146,6 +146,10 @@ val record_infeasible : unit -> unit
 val record_vanished :
   detail:string -> pc:Expr.t list -> types:(Expr.t * Type.t) list -> unit -> unit
 
+(** A one-line description of an exception (analysis failures print their
+    messages only). *)
+val exn_msg : exn -> string
+
 (** [note{internal-exception}] (the configuration is ended separately). *)
 val internal_exception : msg:string -> unit
 

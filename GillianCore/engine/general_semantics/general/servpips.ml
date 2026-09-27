@@ -197,7 +197,18 @@ let incr_end status =
   let n = Option.value (Hashtbl.find_opt counters.ends status) ~default:0 in
   Hashtbl.replace counters.ends status (n + 1)
 
+(* One line, no decoration: newlines/tabs become spaces, runs of spaces and
+   of '!' (Gillian's failure banners) are collapsed, then truncated. *)
 let truncate_reason ?(max = 2000) s =
+  let b = Buffer.create (String.length s) in
+  let last = ref ' ' in
+  String.iter
+    (fun c ->
+      let c = match c with '\n' | '\r' | '\t' -> ' ' | c -> c in
+      if (c = ' ' || c = '!') && !last = c then () else Buffer.add_char b c;
+      last := c)
+    s;
+  let s = String.trim (Buffer.contents b) in
   if String.length s <= max then s else String.sub s 0 max ^ "...(truncated)"
 
 let record_end ~status ~reason ?outcome ~pc ~types () =
@@ -222,6 +233,21 @@ let record_vanished ~detail ~pc ~types () =
   counters.vanished <- counters.vanished + 1;
   note ~code:"vanished" ~msg:(truncate_reason detail) ();
   record_end ~status:"error" ~reason:"vanished" ~pc ~types ()
+
+(* A one-line description of an exception (for [end.reason] and notes). *)
+let exn_msg (e : exn) : string =
+  let raw =
+    match e with
+    | Gillian_result.Exc.Gillian_error (AnalysisFailures fs) ->
+        String.concat "; "
+          (List.map (fun (f : Gillian_result.Error.analysis_failure) -> f.msg) fs)
+    | Gillian_result.Exc.Gillian_error err -> Gillian_result.Error.show_brief err
+    | Gillian_result.Exc.Gillian_internal_error { msg; _ } ->
+        "internal error: " ^ msg
+    | Failure msg -> "Failure: " ^ msg
+    | e -> Printexc.to_string e
+  in
+  String.map (function '\n' | '\r' | '\t' -> ' ' | c -> c) raw
 
 let internal_exception ~msg =
   counters.internal_exceptions <- counters.internal_exceptions + 1;

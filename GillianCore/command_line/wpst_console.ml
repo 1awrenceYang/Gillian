@@ -97,7 +97,7 @@ module Make
         with
         | Stack_overflow -> Servpips.set_fatal "Stack_overflow"
         | Out_of_memory -> Servpips.set_fatal "Out_of_memory"
-        | e -> Servpips.set_fatal ("uncaught exception: " ^ Printexc.to_string e)
+        | e -> Servpips.set_fatal ("uncaught exception: " ^ Servpips.exn_msg e)
       in
       Servpips.emit_stats ();
       Printf.printf "Total time (Compilation + Symbolic testing): %fs\n"
