@@ -39,6 +39,7 @@ let of_yojson j =
 
 let mk lst = { lst; idx = None; gen = fresh_stamp () }
 let generation (pfs : t) = pfs.gen
+let servpips_set_generation (pfs : t) (g : int) = pfs.gen <- g
 
 let invalidate (pfs : t) =
   pfs.idx <- None;

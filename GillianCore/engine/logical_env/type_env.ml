@@ -26,6 +26,7 @@ let to_yojson (x : t) = tbl_to_yojson x.tbl
 let of_yojson j = Result.map mk (tbl_of_yojson j)
 let as_hashtbl x = x.tbl
 let generation (x : t) = x.gen
+let servpips_set_generation (x : t) (g : int) = x.gen <- g
 let touch (x : t) = x.gen <- fresh_stamp ()
 
 (*************************************)
