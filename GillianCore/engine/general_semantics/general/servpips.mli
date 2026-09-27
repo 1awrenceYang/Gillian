@@ -253,7 +253,9 @@ val emit_stats : unit -> unit
     time one line [<n> TAB <seconds> TAB <current rss MB> TAB <hook>] is
     appended to [<file>], where [<hook>] is the result of {!sample_hook}
     (the interpreter sets it to its current position: procedure, command
-    index, call stack, JS source locations, pending configurations). *)
+    index, call stack, JS source locations, pending configurations). With
+    [SERVPIPS_SAMPLE_OCAML=<depth>] a fifth column holds the OCaml call stack
+    (innermost first, [" ; "]-separated function names). *)
 
 val sampling : bool ref
 val sample_hook : (unit -> string) ref

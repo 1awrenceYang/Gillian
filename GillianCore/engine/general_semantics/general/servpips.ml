@@ -484,6 +484,29 @@ let start_sampler () =
       let oc = open_out file in
       let n = ref 0 in
       let t0 = Unix.gettimeofday () in
+      (* SERVPIPS_SAMPLE_OCAML=<depth>: also the OCaml call stack *)
+      let ocaml_depth =
+        match Sys.getenv_opt "SERVPIPS_SAMPLE_OCAML" with
+        | Some d -> Option.value (int_of_string_opt d) ~default:0
+        | None -> 0
+      in
+      let ocaml_stack () =
+        let bt = Printexc.get_callstack ocaml_depth in
+        match Printexc.backtrace_slots bt with
+        | None -> ""
+        | Some slots ->
+            let b = Buffer.create 512 in
+            Array.iteri
+              (fun i slot ->
+                if i > 0 then
+                  match Printexc.Slot.name slot with
+                  | Some nm ->
+                      if Buffer.length b > 0 then Buffer.add_string b " ; ";
+                      Buffer.add_string b nm
+                  | None -> ())
+              slots;
+            Buffer.contents b
+      in
       sampling := true;
       Sys.set_signal Sys.sigprof
         (Sys.Signal_handle
@@ -492,9 +515,10 @@ let start_sampler () =
              let line =
                try !sample_hook () with e -> "exn " ^ Printexc.to_string e
              in
-             Printf.fprintf oc "%d\t%.2f\t%d\t%s\n" !n
+             let ost = if ocaml_depth > 0 then ocaml_stack () else "" in
+             Printf.fprintf oc "%d\t%.2f\t%d\t%s\t%s\n" !n
                (Unix.gettimeofday () -. t0)
-               (current_rss_mb ()) line;
+               (current_rss_mb ()) line ost;
              flush oc));
       let iv = float_of_int ms /. 1000. in
       ignore
