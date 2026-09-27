@@ -168,9 +168,15 @@ let check_entailment
     && right_fs <> []
     && List.for_all
          (fun f ->
-           match Reduction.reduce_lexpr ~pfs:left_fs ~gamma f with
+           (* without context first (cheap: no type inference) *)
+           match Reduction.reduce_lexpr f with
            | Lit (Bool true) -> true
-           | _ -> false)
+           | _ -> (
+               (not (Containers.SS.is_empty (Expr.lvars f)))
+               &&
+               match Reduction.reduce_lexpr ~pfs:left_fs ~gamma f with
+               | Lit (Bool true) -> true
+               | _ -> false))
          right_fs
   then true
   else
