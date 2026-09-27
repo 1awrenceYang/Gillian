@@ -1179,15 +1179,16 @@ proc i__isCallable (l) {
  * @scope: with --servpips (extern servpips_enabled) i__callTarget returns
  * {{ "i__boundCall", f }}, and i__boundCall calls f with the ES5 [[Call]]
  * of bound functions (15.3.4.5.1: bound this, bound arguments first,
- * recursively for bound targets); without --servpips the @scope lookup
- * fails as upstream.
+ * recursively for bound targets); without --servpips the metadata is only
+ * read as upstream (the @scope lookup of a bound function fails as
+ * upstream).
  *)
 proc i__callTarget (f) {
           m := metadata(f);
-          bnd := hasField(m, "@boundThis");
-          goto [bnd] sp norm;
-  sp:     en := extern servpips_enabled ();
-          goto [en] bound norm;
+          en := extern servpips_enabled ();
+          goto [en] sp norm;
+  sp:     bnd := hasField(m, "@boundThis");
+          goto [bnd] bound norm;
   bound:  ret := {{ "i__boundCall", f }};
           return;
   norm:   fun := [m, "@call"];
