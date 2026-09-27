@@ -342,6 +342,70 @@ let translate_named_function_literal
   let cmds = [ cmd_cfoc; cmd_ass_xer; cmd_f ] in
   (cmds, PVar x_f, [])
 
+(* ------------------------------------------------------------------------ *)
+(* SERVPIPS arithmetic (design E14 / D11): with --servpips, the numeric      *)
+(* [+ - * / %] of the analysed JS code (binary operators, compound           *)
+(* assignments, [++]/[--]) compile to                                        *)
+(*   x := extern servpips_arith("<op>", a, b, "<site>")                     *)
+(* instead of the GIL float operation; see Semantics/ServpipsRt.ml for the   *)
+(* rules. The JSIL runtime's own arithmetic is unchanged.                    *)
+(* ------------------------------------------------------------------------ *)
+
+(** Site string of a JS location: [<file>:<line>:<col>:<endcol>] or
+    [<file>:<line>:<col>:<endline>:<endcol>]; leading ["./"] and ["../"]
+    segments of the file path are dropped (paths are relative to the work
+    directory, so the result does not depend on the shard directory). *)
+let servpips_site_of_loc (loc : JS_Parser.Loc.t) : string =
+  let open JS_Parser.Loc in
+  let file =
+    match loc.source with
+    | None -> "(none)"
+    | Some source -> file_key_to_string source
+  in
+  let rec strip f =
+    if String.starts_with ~prefix:"./" f then
+      strip (String.sub f 2 (String.length f - 2))
+    else if String.starts_with ~prefix:"../" f then
+      strip (String.sub f 3 (String.length f - 3))
+    else f
+  in
+  let file = strip file in
+  if loc.start.line = loc._end.line then
+    Printf.sprintf "%s:%d:%d:%d" file loc.start.line loc.start.column
+      loc._end.column
+  else
+    Printf.sprintf "%s:%d:%d:%d:%d" file loc.start.line loc.start.column
+      loc._end.line loc._end.column
+
+(** Site of the arithmetic operation being compiled (set by [translate_expr]
+    before it calls the arithmetic helpers below). *)
+let servpips_arith_site : string ref = ref "(none)"
+
+let servpips_arith_op_name (op : BinOp.t) : string =
+  match op with
+  | FPlus -> "+"
+  | FMinus -> "-"
+  | FTimes -> "*"
+  | FDiv -> "/"
+  | FMod -> "%"
+  | _ -> raise (Failure "servpips_arith: not an arithmetic operator")
+
+(** [x_r := a op b], or its SERVPIPS extern form. *)
+let servpips_arith_cmd (x_r : string) (a : Expr.t) (op : BinOp.t) (b : Expr.t)
+    : LabCmd.t =
+  if Gillian.General.Servpips.enabled () then
+    LECall
+      ( x_r,
+        Lit (String "servpips_arith"),
+        [
+          Lit (String (servpips_arith_op_name op));
+          a;
+          b;
+          Lit (String !servpips_arith_site);
+        ],
+        None )
+  else LBasic (Assignment (x_r, BinOp (a, op, b)))
+
 let translate_inc_dec x is_plus err =
   (*
               goto [ (typeof (x) = $$v-reference_type) and ((field(x) = "eval") or (field(x) = "arguments")) ] err next
@@ -367,7 +431,7 @@ let translate_inc_dec x is_plus err =
   let x_r = fresh_var () in
   let cmd_ass_xr =
     let (op : BinOp.t) = if is_plus then FPlus else FMinus in
-    LBasic (Assignment (x_r, BinOp (PVar x_n, op, Lit (Num 1.))))
+    servpips_arith_cmd x_r (PVar x_n) op (Lit (Num 1.))
   in
 
   (* x_pv = putValue (x, x_r) with err4 *)
@@ -408,9 +472,7 @@ let translate_multiplicative_binop x1 x2 x1_v x2_v aop err =
   let x2_n, cmd_tn_x2 = make_to_number_call x2 x2_v err in
   (* x_r := x1_n * x2_n *)
   let x_r = fresh_var () in
-  let cmd_ass_xr =
-    LBasic (Assignment (x_r, BinOp (PVar x1_n, jsil_aop, PVar x2_n)))
-  in
+  let cmd_ass_xr = servpips_arith_cmd x_r (PVar x1_n) jsil_aop (PVar x2_n) in
 
   (* In JavaScript, division (and modulo) by zero is well-defined: it yields
      [Infinity], [-Infinity] or [NaN] and never raises an exception. The
@@ -480,9 +542,7 @@ let translate_binop_plus x1 x2 x1_v x2_v err =
 
   (* x_relse := x1_n + x2_n  *)
   let x_relse = fresh_var () in
-  let cmd_ass_xrelse =
-    LBasic (Assignment (x_relse, BinOp (PVar x1_n, FPlus, PVar x2_n)))
-  in
+  let cmd_ass_xrelse = servpips_arith_cmd x_relse (PVar x1_n) FPlus (PVar x2_n) in
 
   (* end:  x_r := PHI (x_rthen, x_relse) *)
   let x_r = fresh_var () in
@@ -783,6 +843,88 @@ let servpips_special_form (f_name : string) : string option =
   if String.length f_name > n && String.starts_with ~prefix:js_prefix f_name
   then Some ("servpips_" ^ String.sub f_name n (String.length f_name - n))
   else None
+
+(* ------------------------------------------------------------------------ *)
+(* SERVPIPS call-site register (design E4 / D8).                             *)
+(*                                                                          *)
+(* [__servpips_at("<site>", CALL)] compiles CALL (a JS call or [new]) and,   *)
+(* after the callee value and all the arguments have been evaluated and      *)
+(* immediately before the call instruction, writes the triple               *)
+(*   [$lservpips].site   := "<site>"                                         *)
+(*   [$lservpips].callee := <callee value>                                   *)
+(*   [$lservpips].seq    := [$lservpips].seq + 1                             *)
+(* into the internal object [$lservpips] (not reachable from JS; its cells   *)
+(* hold raw values, not property descriptors). The extern                    *)
+(* [servpips_site(fn)] (Semantics/ServpipsRt.ml) checks the callee against   *)
+(* [fn] and consumes the register. [$lservpips] is allocated by [main]       *)
+(* right after the initial heap is set up, when the program uses the         *)
+(* register or when --servpips is on (the per-path counters of               *)
+(* [servpips_arith] and the recorded outcome also live there).               *)
+(* ------------------------------------------------------------------------ *)
+
+let servpips_register_loc = "$lservpips"
+
+(** Set when the compiled program uses a SERVPIPS special form
+    ([__servpips_<name>]); read by the runtime hooks of Semantics/ServpipsRt
+    (which are inert for programs without SERVPIPS forms and without
+    --servpips). *)
+let servpips_forms_used = ref false
+
+(** The [__servpips_at] whose CALL is being compiled: the site string and the
+    CALL expression itself (compared physically, so that calls nested in the
+    callee or argument expressions do not take the register write). *)
+let servpips_at_pending : (string * JS_Parser.Syntax.exp) option ref = ref None
+
+(** Called at the start of the translation of a [Call]/[New] expression:
+    returns the site if this expression is the CALL of the pending
+    [__servpips_at] (and clears it). *)
+let servpips_take_site (e : JS_Parser.Syntax.exp) : string option =
+  match !servpips_at_pending with
+  | Some (site, target) when target == e ->
+      servpips_at_pending := None;
+      Some site
+  | _ -> None
+
+(** The JSIL commands writing the register (see above). *)
+let servpips_register_cmds (site : string option) (x_f_val : string) :
+    (string option * LabCmd.t) list =
+  match site with
+  | None -> []
+  | Some site ->
+      let reg = Lit (Loc servpips_register_loc) in
+      let x_seq = fresh_var () in
+      [
+        (None, LBasic (Mutation (reg, Lit (String "site"), Lit (String site))));
+        (None, LBasic (Mutation (reg, Lit (String "callee"), PVar x_f_val)));
+        (None, LBasic (Lookup (x_seq, reg, Lit (String "seq"))));
+        ( None,
+          LBasic
+            (Mutation
+               (reg, Lit (String "seq"), BinOp (PVar x_seq, FPlus, Lit (Num 1.))))
+        );
+      ]
+
+(** Does the program use the register ([__servpips_at] / [__servpips_site])? *)
+let servpips_uses_register (e : JS_Parser.Syntax.exp) : bool =
+  let f_ac (e : JS_Parser.Syntax.exp) _ _ (acc : bool list) =
+    match e.JS_Parser.Syntax.exp_stx with
+    | JS_Parser.Syntax.Var ("__servpips_at" | "__servpips_site") -> [ true ]
+    | _ -> [ List.exists Fun.id acc ]
+  in
+  try List.exists Fun.id (js_fold f_ac (fun _ s -> s) () e) with _ -> true
+
+(** Commands allocating and initialising [$lservpips]. *)
+let servpips_register_init_cmds () : LabCmd.t list =
+  let reg = Lit (Loc servpips_register_loc) in
+  let x_new = fresh_var () in
+  [
+    LBasic (New (x_new, Some reg, Some (Lit Null)));
+    LBasic (Mutation (reg, Lit (String "site"), Lit Null));
+    LBasic (Mutation (reg, Lit (String "callee"), Lit Null));
+    LBasic (Mutation (reg, Lit (String "seq"), Lit (Num 0.)));
+    LBasic (Mutation (reg, Lit (String "outcome"), Lit Null));
+  ]
+
 
 (*
   *  translate_expr( tr_ctx, e) = cmds, e', x_is
@@ -1686,6 +1828,8 @@ let rec translate_expr tr_ctx e :
       let errs = errs @ errs_x_v @ [ x_oc ] in
       (cmds, PVar x_r, errs)
   | JS_Parser.Syntax.New (e_f, xes) ->
+      (* SERVPIPS: site register of an enclosing [__servpips_at], if any *)
+      let sp_site = servpips_take_site e in
       (*
       Section 11.2.2 - The new Operator
       C(e_f) = cmds_ef, x_f
@@ -1978,6 +2122,7 @@ let rec translate_expr tr_ctx e :
             ]
           @ annotate_first_call_cmd
               (cmds_args
+              @ annotate_cmds (servpips_register_cmds sp_site x_f_val)
               @ annotate_cmds
                   [
                     (*        cmds_arg_i; x_arg_i_val := i__getValue (x_arg_i) with err               *)
@@ -2224,6 +2369,52 @@ let rec translate_expr tr_ctx e :
       in
       ([ cmd1; cmd2 ], x_v, [])
   | JS_Parser.Syntax.Call
+      ({ JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var "__servpips_at"; _ }, xes)
+    -> (
+      (* SERVPIPS [__servpips_at("<site>", CALL)] (design E4): the value is
+         the value of CALL; the site register is written right before CALL's
+         call instruction (see [servpips_register_cmds]). The second argument
+         must be an ordinary call or [new] expression, the first a string
+         literal; anything else is a compile error. *)
+      let fail msg =
+        servpips_at_pending := None;
+        raise
+          (Failure
+             (Printf.sprintf "SERVPIPS: __servpips_at at %s: %s"
+                (servpips_site_of_loc js_loc)
+                msg))
+      in
+      servpips_forms_used := true;
+      match xes with
+      | [
+       { JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.String site; _ };
+       ({
+          JS_Parser.Syntax.exp_stx =
+            JS_Parser.Syntax.Call _ | JS_Parser.Syntax.New _;
+          _;
+        } as call);
+      ] ->
+          let saved = !servpips_at_pending in
+          servpips_at_pending := Some (site, call);
+          let result =
+            try translate_expr tr_ctx call
+            with exn ->
+              servpips_at_pending := saved;
+              raise exn
+          in
+          (match !servpips_at_pending with
+          | Some (_, target) when target == call ->
+              fail
+                "the second argument is not an ordinary call (it is a \
+                 special form)"
+          | _ -> ());
+          servpips_at_pending := saved;
+          result
+      | [ { JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.String _; _ }; _ ] ->
+          fail "the second argument must be a call or new expression"
+      | [ _; _ ] -> fail "the first argument must be a string literal"
+      | _ -> fail "expected exactly two arguments")
+  | JS_Parser.Syntax.Call
       ({ JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.Var f_name; _ }, xes)
     when servpips_special_form f_name <> None ->
       (* SERVPIPS special form: [__servpips_<name>(a1, ..., an)] (callee is
@@ -2235,6 +2426,7 @@ let rec translate_expr tr_ctx e :
          externs are dispatched by Semantics/External.ml to the registry in
          Semantics/ServpipsExterns.ml. *)
       let extern_name = Option.get (servpips_special_form f_name) in
+      servpips_forms_used := true;
       let cmds_args, proc_args, errs_args =
         translate_arg_list xes tr_ctx.tr_err_lab
       in
@@ -2275,6 +2467,8 @@ let rec translate_expr tr_ctx e :
         PVar x_rcall,
         errs_args @ [ x_rcall ] )
   | JS_Parser.Syntax.Call (e_f, xes) ->
+      (* SERVPIPS: site register of an enclosing [__servpips_at], if any *)
+      let sp_site = servpips_take_site e in
       (*
       Section 11.2.3 - Function call
       C(e_f) = cmds_ef, x_f
@@ -2500,6 +2694,7 @@ let rec translate_expr tr_ctx e :
             ]
           @ annotate_first_call_cmd
               (cmds_args
+              @ annotate_cmds (servpips_register_cmds sp_site x_f_val)
               @ annotate_cmds
                   [
                     (*        cmds_arg_i; x_arg_i_val := i__getValue (x_arg_i) with err                 *)
@@ -2603,7 +2798,8 @@ let rec translate_expr tr_ctx e :
      *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, x_v, _ =
-        translate_inc_dec x true tr_ctx.tr_err_lab
+        (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_inc_dec x true tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
       (annotate_first_cmd (cmds @ new_cmds), PVar x_v, errs @ new_errs)
@@ -2622,7 +2818,8 @@ let rec translate_expr tr_ctx e :
      *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, x_v, _ =
-        translate_inc_dec x false tr_ctx.tr_err_lab
+        (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_inc_dec x false tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
       (annotate_first_cmd (cmds @ new_cmds), PVar x_v, errs @ new_errs)
@@ -2833,7 +3030,8 @@ let rec translate_expr tr_ctx e :
      *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, _, x_r =
-        translate_inc_dec x true tr_ctx.tr_err_lab
+        (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_inc_dec x true tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
       (annotate_first_cmd (cmds @ new_cmds), PVar x_r, errs @ new_errs)
@@ -2850,7 +3048,8 @@ let rec translate_expr tr_ctx e :
        *)
       let cmds, x, errs = f e in
       let new_cmds, new_errs, _, x_r =
-        translate_inc_dec x false tr_ctx.tr_err_lab
+        (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_inc_dec x false tr_ctx.tr_err_lab)
       in
       let new_cmds = annotate_cmds new_cmds in
       (annotate_first_cmd (cmds @ new_cmds), PVar x_r, errs @ new_errs)
@@ -3022,7 +3221,8 @@ let rec translate_expr tr_ctx e :
       in
 
       let new_cmds, new_errs, x_r =
-        translate_multiplicative_binop x1 x2 x1_v x2_v aop tr_ctx.tr_err_lab
+        (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_multiplicative_binop x1 x2 x1_v x2_v aop tr_ctx.tr_err_lab)
       in
       let cmds =
         annotate_first_cmd
@@ -3067,7 +3267,8 @@ let rec translate_expr tr_ctx e :
       in
 
       let new_cmds, new_errs, x_r =
-        translate_binop_plus x1 x2 x1_v x2_v tr_ctx.tr_err_lab
+        (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_binop_plus x1 x2 x1_v x2_v tr_ctx.tr_err_lab)
       in
       let cmds =
         annotate_first_cmd
@@ -3897,12 +4098,14 @@ let rec translate_expr tr_ctx e :
       let new_cmds, new_errs, x_r =
         match op with
         | JS_Parser.Syntax.Plus ->
-            translate_binop_plus x1 x2 x1_v x2_v tr_ctx.tr_err_lab
+            (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_binop_plus x1 x2 x1_v x2_v tr_ctx.tr_err_lab)
         | JS_Parser.Syntax.Minus
         | JS_Parser.Syntax.Times
         | JS_Parser.Syntax.Div
         | JS_Parser.Syntax.Mod ->
-            translate_multiplicative_binop x1 x2 x1_v x2_v op tr_ctx.tr_err_lab
+            (servpips_arith_site := servpips_site_of_loc js_loc;
+         translate_multiplicative_binop x1 x2 x1_v x2_v op tr_ctx.tr_err_lab)
         | JS_Parser.Syntax.Ursh ->
             translate_bitwise_shift x1 x2 x1_v x2_v toUInt32Name toUInt32Name
               SignedRightShiftF tr_ctx.tr_err_lab
@@ -6858,10 +7061,16 @@ let generate_main e strictness spec : EProc.t =
     else [ cmd_err_phi_node; lab_err_cmd ]
   in
 
+  (* SERVPIPS: allocate the internal register object [$lservpips] *)
+  let servpips_init =
+    if Gillian.General.Servpips.enabled () || servpips_uses_register e then
+      List.map (fun cmd -> annotate_cmd cmd None) (servpips_register_init_cmds ())
+    else []
+  in
+
   let main_cmds =
-    [
-      setup_heap_ass; init_scope_chain_ass; init_scope_chain_ass_again; this_ass;
-    ]
+    [ setup_heap_ass ] @ servpips_init
+    @ [ init_scope_chain_ass; init_scope_chain_ass_again; this_ass ]
     @ global_var_asses
     @ [ cmd_ass_te; cmd_ass_se; cmd_ass_re ]
     @ cmds_hoist_fdecls @ cmds_e

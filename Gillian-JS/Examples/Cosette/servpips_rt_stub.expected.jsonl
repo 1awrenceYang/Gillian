@@ -1,0 +1,3 @@
+{"ev": "decl", "lvar": "#gen__0", "name": "case", "sort": "Num", "kind": "input", "parent": null, "key": null, "parent_lvar": null, "parent_aloc": null, "shape": null, "open": null, "site": null, "k": null}
+{"ev": "end", "status": "unsupported", "reason": "stub: Array.prototype.includes", "outcome": null, "pc": [{"pp": "(#gen__0 == 0.)", "ast": ["BinOp", ["LVar", "#gen__0"], ["Equal"], ["Lit", ["Num", 0.0]]]}], "types": [[{"pp": "#gen__0", "ast": ["LVar", "#gen__0"]}, "Num"]]}
+{"ev": "note", "code": "after-join", "msg": "1-2", "site": null, "data": null}

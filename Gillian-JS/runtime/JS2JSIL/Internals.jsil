@@ -80,16 +80,75 @@ proc getOwnProperty (l, prop) {
 	elab: throw
 };
 
+(*
+ * SERVPIPS hook (design E11; inert unless the program uses SERVPIPS special
+ * forms or --servpips is on, see Semantics/ServpipsRt.mli): on a miss, if
+ * the metadata of l has @sp_resolver R, call R(l, prop) (JS calling
+ * convention, exceptions propagate) and look prop up again.
+ * A cell of a key in @sp_lazykeys whose value is undefined is returned as
+ * is (a "phantom" cell): [[Get]], [[CanPut]], [[DefineOwnProperty]] and
+ * [[Delete]] give the same results with it; the existence tests use
+ * i__getOwnPropertyE / i__getPropertyE below.
+ *)
 proc o__getOwnProperty (l, prop) {
           x := hasField(l, prop);
           goto [x] hp nhp; 		  (* Does the field exist? *)
 
-    nhp:  ret := undefined;		  (* Field doesn't exist; rtrn undefined *)
+    nhp:  rf := extern servpips_resolver (l);
+          goto [rf = empty] und res;
+
+    res:  rm := metadata(rf);
+          rsc := [rm, "@scope"];
+          rfn := [rm, "@call"];
+          rr := rfn (rsc, undefined, l, prop) with elab;
+          x := hasField(l, prop);
+          goto [x] hp und;
+
+    und:  ret := undefined;		  (* Field doesn't exist; rtrn undefined *)
           goto rlab;
 
     hp:   ret := [l, prop];		  (* Field exists; rtrn the descriptor *)
 
-    rlab: return
+    rlab: return;
+    elab: throw
+};
+
+(*
+ * SERVPIPS (design E11, section 3.2): [[GetOwnProperty]] / [[GetProperty]]
+ * with the existence rule of lazily created keys: if prop is in the
+ * @sp_lazykeys of the object (created lazily, never written), the property
+ * exists iff its value is not undefined (forks when that is unknown). Used
+ * by HasProperty (in, Array methods), hasOwnProperty, propertyIsEnumerable
+ * and getOwnPropertyDescriptor.
+ *)
+proc i__getOwnPropertyE (l, prop) {
+          ret := "getOwnProperty" (l, prop) with elab;
+          goto [ret = undefined] rlab chk;
+
+    chk:  lz := extern servpips_lazykey (l, prop);
+          goto [lz] lzv rlab;
+
+    lzv:  goto [(l-nth (ret, 1)) = undefined] und rlab;
+
+    und:  ret := undefined;
+
+    rlab: return;
+    elab: throw
+};
+
+proc i__getPropertyE (l, prop) {
+
+		  ret := "i__getOwnPropertyE" (l, prop) with elab;
+		  goto [ret = undefined] next rlab;
+
+    next: m := metadata(l);
+          proto := [m, "@proto"];
+          goto [proto = null] rlab call;
+
+    call: ret := "i__getPropertyE" (proto, prop) with elab;
+
+    rlab: return;
+    elab: throw
 };
 
 (* *********** *)
@@ -118,7 +177,13 @@ proc getProperty (l, prop) {
 proc get (l, prop) {
 
 			ret := "getProperty" (l, prop) with elab;
-			goto [ret = undefined] rlab def;		(* Does the field exist?    *)
+			goto [ret = undefined] miss def;		(* Does the field exist?    *)
+
+			(* SERVPIPS (E11): a miss on the whole prototype chain of a model
+			   object ends the path unsupported (allow-list: then, toJSON,
+			   inspect, constructor) *)
+	miss:	mm := extern servpips_model_miss (l, prop);
+			goto rlab;
 
 	def:	d := l-nth (ret, 0);					(* Get the descriptor type  *)
 			ret := l-nth (ret, 1);				(* Get the value/getter     *)
@@ -205,7 +270,9 @@ proc put (l, prop, value, thrw) {
     remp:   ret := empty;
     rlab:   return;
 
-    reject: goto [thrw] tt remp;
+    (* SERVPIPS (E10): a rejected [[Put]] ends the path unsupported *)
+    reject: rj := extern servpips_rejected ("put-rejected");
+            goto [thrw] tt remp;
     tt:     ret := "TypeError" ();
     elab:   throw
 };
@@ -215,7 +282,11 @@ proc put (l, prop, value, thrw) {
 (* *********** *)
 
 proc hasProperty (l, prop) {
-			ret := "getProperty" (l, prop) with elab;
+			ret := "i__getPropertyE" (l, prop) with elab;
+			goto [ret = undefined] miss rlab;
+
+			(* SERVPIPS (E11): as in get *)
+	miss:	mm := extern servpips_model_miss (l, prop);
 
 	rlab:	ret := not (ret = undefined);
 				return;
@@ -241,7 +312,9 @@ proc deleteProperty (l, prop, thrw) {
 	df:		ret := false;
 	rlab:   return;
 
-    reject: goto [thrw] tt df;
+    (* SERVPIPS (E10): a rejected [[Delete]] ends the path unsupported *)
+    reject: rj := extern servpips_rejected ("delete-rejected");
+            goto [thrw] tt df;
 
     tt:     ret := "TypeError" ();
     elab:   throw
@@ -805,7 +878,10 @@ proc i__putValue (v, w) {
             ret := fun (xsc, rbase, w) with elab;
             goto dflt;
 
-	reject: ret := "TypeError" ();
+	(* SERVPIPS (E10): a rejected [[Put]] on a primitive base ends the path
+	   unsupported *)
+	reject: rj := extern servpips_rejected ("put-rejected");
+			ret := "TypeError" ();
     		goto elab
 };
 
@@ -879,7 +955,9 @@ proc i__toNumber (v) {
 			goto rlab;
 
 	is:		goto [typeOf v = Str] str io;
-	str:	ret := string_to_num v;
+	(* SERVPIPS (E18): servpips_tonumber = string_to_num, except that a
+	   symbolic string forks NaN / +Infinity / -Infinity / number *)
+	str:	ret := extern servpips_tonumber (v);
 			goto rlab;
 
 	io:		goto [typeOf v = Obj] obj oops;

@@ -16,6 +16,10 @@ import Internals.jsil;
 		then it has additional properties
 *)
 proc i__getFields (l) {
+			  (* SERVPIPS (E11): enumerating an open object (@sp_open, or a
+			     LazyJSON object that is not an array) or a model object
+			     ends the path unsupported *)
+			  ec := extern servpips_enum_check (l);
 			  ret := getFields (l);
 
 			  m := metadata(l);
@@ -194,7 +198,8 @@ proc Object_getOwnPropertyDescriptor (xsc, vthis, o, prop) {
             o := ret;
 
 	start:	ret := "i__toString" (prop) with elab;
-			ret := "getOwnProperty" (o, ret) with elab;
+			(* SERVPIPS (E11): existence rule of lazily created keys *)
+			ret := "i__getOwnPropertyE" (o, ret) with elab;
 
 			ret := "i__fromPropertyDescriptor" (ret) with elab;
 
@@ -530,7 +535,7 @@ proc OP_hasOwnProperty(xsc, vthis, v) {
 			p := ret;
 
 			ret := "i__toObject" (vthis) with elab;
-			ret := "getOwnProperty" (ret, p) with elab;
+			ret := "i__getOwnPropertyE" (ret, p) with elab; (* SERVPIPS (E11) *)
 
 			goto [ret = undefined] undef def;
 
@@ -573,7 +578,7 @@ proc OP_propertyIsEnumerable(xsc, vthis, v) {
 			p := ret;
 
 			ret := "i__toObject" (vthis) with elab;
-			ret := "getOwnProperty" (ret, p) with elab;
+			ret := "i__getOwnPropertyE" (ret, p) with elab; (* SERVPIPS (E11) *)
 
 			goto [ret = undefined] undef def;
 
