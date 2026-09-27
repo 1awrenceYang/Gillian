@@ -2466,7 +2466,7 @@ struct
         if Servpips.enabled () && not !Config.debug then (
           (* SERVPIPS (E1): stream the end event and drop the final state *)
           let reason =
-            Fmt.str "%s:%d: @[<h>%a@]" proc proc_idx
+            Fmt.str "%s: @[<h>%a@]" proc
               (Fmt.list ~sep:(Fmt.any "; ") pp_err_t)
               errors
           in
