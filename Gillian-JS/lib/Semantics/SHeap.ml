@@ -21,10 +21,13 @@ type t = {
           (non-[none]) property of every object, maintained only in SERVPIPS
           mode; used to enumerate own properties in ES2020
           OrdinaryOwnPropertyKeys order. *)
-  applied : (string, Expr.t) Hashtbl.t;
-      (** SERVPIPS (E19): substitution bindings (printed key -> value) already
-          applied to this heap, see [substitution_in_place]; SERVPIPS mode
-          only. *)
+  occ : (string, SS.t) Hashtbl.t;
+      (** SERVPIPS (E19): occurrence index, maintained only in SERVPIPS mode:
+          name of a logical variable, abstract location or program variable
+          -> the locations whose symbolic part (symbolic field names and
+          values, symbolic domain, symbolic metadata) may mention it (a
+          superset). [substitution_in_place] visits only the objects that
+          mention a substituted name. *)
 }
 [@@deriving yojson]
 
@@ -47,6 +50,34 @@ let next_seq () =
 (** Objects that [clean_up] must never remove (set by ServpipsLazy: lazily
     materialised input objects start with no fields and no domain). *)
 let keep_hook : (string -> bool) ref = ref (fun _ -> false)
+
+(** Names (logical variables, abstract locations, program variables) that
+    occur in [e], added to [acc]. *)
+let rec add_names (acc : string list) (e : Expr.t) : string list =
+  match e with
+  | Lit _ -> acc
+  | PVar x | LVar x | ALoc x -> x :: acc
+  | UnOp (_, e) | Exists (_, e) | ForAll (_, e) -> add_names acc e
+  | BinOp (a, _, b) -> add_names (add_names acc a) b
+  | LstSub (a, b, c) -> add_names (add_names (add_names acc a) b) c
+  | NOp (_, l) | EList l | ESet l | ConstructorApp (_, l) | FuncApp (_, l) ->
+      List.fold_left add_names acc l
+  | Cases (e, cs) ->
+      List.fold_left (fun acc (_, _, e) -> add_names acc e) (add_names acc e) cs
+
+(** Record in the occurrence index that [loc] may mention the names of [es]. *)
+let index_exprs (heap : t) (loc : string) (es : Expr.t list) : unit =
+  List.iter
+    (fun v ->
+      match Hashtbl.find_opt heap.occ v with
+      | Some s when SS.mem loc s -> ()
+      | Some s -> Hashtbl.replace heap.occ v (SS.add loc s)
+      | None -> Hashtbl.replace heap.occ v (SS.singleton loc))
+    (List.fold_left add_names [] es)
+
+let index_fvl (heap : t) (loc : string) (sfvl : SFVL.t) : unit =
+  if track_order () then
+    SFVL.iter (fun k v -> index_exprs heap loc [ k; v ]) sfvl
 
 let get_ord (heap : t) (loc : string) : int Expr.Map.t =
   Option.value ~default:Expr.Map.empty (Hashtbl.find_opt heap.ord loc)
@@ -118,6 +149,7 @@ let set_fvl (heap : t) (loc : string) (fvl : SFVL.t) : unit =
   let cfvl, sfvl =
     SFVL.partition (fun prop value -> is_c value && is_c prop) fvl
   in
+  index_fvl heap loc sfvl;
   match (cfvl = SFVL.empty, sfvl = SFVL.empty) with
   | true, true ->
       Hashtbl.replace heap.cfvl loc SFVL.empty;
@@ -142,7 +174,9 @@ let set_dom (heap : t) (loc : string) (dom : Expr.t option) : unit =
   Hashtbl.remove heap.sdom loc;
   let add, rem =
     match dom with
-    | Some x when not (is_c x) -> (heap.sdom, heap.cdom)
+    | Some x when not (is_c x) ->
+        if track_order () then index_exprs heap loc [ x ];
+        (heap.sdom, heap.cdom)
     | _ -> (heap.cdom, heap.sdom)
   in
   Hashtbl.replace add loc dom;
@@ -153,7 +187,9 @@ let set_met (heap : t) (loc : string) (met : Expr.t option) : unit =
   Hashtbl.remove heap.smet loc;
   let add, rem =
     match met with
-    | Some x when not (is_c x) -> (heap.smet, heap.cmet)
+    | Some x when not (is_c x) ->
+        if track_order () then index_exprs heap loc [ x ];
+        (heap.smet, heap.cmet)
     | _ -> (heap.cmet, heap.smet)
   in
   Hashtbl.replace add loc met;
@@ -177,7 +213,7 @@ let init () : t =
     cdmn = ref SS.empty;
     sdmn = ref SS.empty;
     ord = Hashtbl.create big_tbl_size;
-    applied = Hashtbl.create 16;
+    occ = Hashtbl.create big_tbl_size;
   }
 
 (** Symbolic heap read heap(loc) *)
@@ -217,7 +253,9 @@ let set_fv_pair (heap : t) (loc : string) (field : Expr.t) (value : Expr.t) :
   heap.sdmn := Var.Set.remove loc !(heap.sdmn);
   let add, sadd, rem =
     if is_c field && is_c value then (heap.cfvl, heap.cdmn, heap.sfvl)
-    else (heap.sfvl, heap.sdmn, heap.cfvl)
+    else (
+      if track_order () then index_exprs heap loc [ field; value ];
+      (heap.sfvl, heap.sdmn, heap.cfvl))
   in
   let fvadd =
     SFVL.add field value
@@ -275,7 +313,7 @@ let copy (heap : t) : t =
     cdmn = ref !(heap.cdmn);
     sdmn = ref !(heap.sdmn);
     ord = Hashtbl.copy heap.ord;
-    applied = Hashtbl.copy heap.applied;
+    occ = Hashtbl.copy heap.occ;
   }
 
 let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
@@ -328,59 +366,97 @@ let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
   set_met heap new_loc met;
   remove heap old_loc
 
+(** Substitution of the abstract locations themselves: [aloc] is merged into
+    the location it is mapped to. *)
+let substitute_alocs (subst : SSubst.t) (heap : t) : unit =
+  let aloc_subst =
+    SSubst.filter subst (fun var _ ->
+        match var with
+        | ALoc _ -> true
+        | _ -> false)
+  in
+  SSubst.iter aloc_subst (fun aloc new_loc ->
+      let aloc =
+        match aloc with
+        | ALoc loc -> loc
+        | _ -> raise (Failure "Impossible by construction")
+      in
+      let new_loc =
+        match (new_loc : Expr.t) with
+        | Lit (Loc loc) -> loc
+        | ALoc loc -> loc
+        | _ ->
+            raise
+              (Failure
+                 (Printf.sprintf "Heap substitution fail for loc: %s"
+                    ((Fmt.to_to_string Expr.pp) new_loc)))
+      in
+      merge_loc heap new_loc aloc)
+
+(** Substitution of the symbolic part of the object at [loc] (upstream
+    semantics of the full walk below, for one object). *)
+let substitute_object (subst : SSubst.t) le_subst (heap : t) (loc : string) :
+    unit =
+  (* SERVPIPS (E15): symbolic field names may be substituted *)
+  (match Hashtbl.find_opt heap.ord loc with
+  | Some m
+    when Hashtbl.mem heap.sfvl loc
+         && Expr.Map.exists (fun k _ -> not (is_c k)) m ->
+      Hashtbl.replace heap.ord loc
+        (Expr.Map.fold (fun k n m' -> Expr.Map.add (le_subst k) n m') m
+           Expr.Map.empty)
+  | _ -> ());
+  (match Hashtbl.find_opt heap.sfvl loc with
+  | Some fvl ->
+      let fvl = SFVL.substitution subst true fvl in
+      let cfvl, sfvl =
+        SFVL.partition (fun prop value -> is_c value && is_c prop) fvl
+      in
+      Hashtbl.replace heap.sfvl loc sfvl;
+      index_fvl heap loc sfvl;
+      let prev_cfvl =
+        Option.value ~default:SFVL.empty (Hashtbl.find_opt heap.cfvl loc)
+      in
+      Hashtbl.replace heap.cfvl loc (SFVL.union cfvl prev_cfvl)
+  | None -> ());
+  (match Hashtbl.find_opt heap.sdom loc with
+  | Some dom -> set_dom heap loc (Option.map le_subst dom)
+  | None -> ());
+  match Hashtbl.find_opt heap.smet loc with
+  | Some met -> set_met heap loc (Option.map le_subst met)
+  | None -> ()
+
 (** Modifies --heap-- in place updating it to subst(heap) *)
 let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
-  (* SERVPIPS (E19): SState.simplify re-derives the same substitution from
-     equalities that stay in the path condition (e.g. the class fact
-     [x == #loc] of a materialised LazyJSON value, kept on purpose) before
-     every memory action, and each application walks every object with
-     symbolic content -- with the full ES5 initial heap and the runtime
-     preamble, thousands of objects whose fields hold abstract locations.
-     A binding already applied to this heap is skipped: it is re-derived from
-     the path condition, which therefore still entails it, so an occurrence of
-     its key that re-entered the heap afterwards is equal to its value in
-     every model (memory actions resolve locations through the path
-     condition); only the normalisation is not repeated. *)
-  let subst =
-    if not (track_order ()) then subst
-    else
-      SSubst.filter subst (fun k v ->
-          let key = Fmt.to_to_string Expr.pp k in
-          match Hashtbl.find_opt heap.applied key with
-          | Some v' when Expr.equal v v' -> false
-          | _ ->
-              Hashtbl.replace heap.applied key v;
-              true)
-  in
-  (* If the substitution is empty, there is nothing to be done *)
-  if not (SSubst.domain subst None = Expr.Set.empty) then (
+  if SSubst.domain subst None = Expr.Set.empty then ()
+  else if track_order () then (
+    (* SERVPIPS (E19): SState.simplify applies a substitution before every
+       memory action (e.g. the class fact [x == #loc] of a materialised
+       LazyJSON value, kept in the path condition on purpose, is re-derived
+       each time); the full walk below visits every object with symbolic
+       content (the ES5 initial heap and the runtime preamble: thousands).
+       Only the objects that mention a substituted name (occurrence index)
+       can change; they are substituted exactly as the full walk would, and
+       re-indexed. *)
+    let le_subst = SSubst.subst_in_expr subst ~partial:true in
+    let names =
+      Expr.Set.fold (fun k acc -> add_names acc k) (SSubst.domain subst None) []
+    in
+    let cands =
+      List.fold_left
+        (fun acc v ->
+          match Hashtbl.find_opt heap.occ v with
+          | Some s -> SS.union s acc
+          | None -> acc)
+        SS.empty names
+    in
+    (* the candidates are re-indexed from their substituted contents *)
+    List.iter (fun v -> Hashtbl.remove heap.occ v) names;
+    SS.iter (substitute_object subst le_subst heap) cands;
+    substitute_alocs subst heap)
+  else (
     (* The substitution is not empty *)
     let le_subst = SSubst.subst_in_expr subst ~partial:true in
-
-    (*
-      L.(verbose (fun m -> m "CFVL: %d" (Hashtbl.length heap.cfvl)));
-      L.(verbose (fun m -> m "SFVL: %d" (Hashtbl.length heap.sfvl)));
-      L.(verbose (fun m -> m "CDOM: %d" (Hashtbl.length heap.cdom)));
-      L.(verbose (fun m -> m "SDOM: %d" (Hashtbl.length heap.sdom)));
-      L.(verbose (fun m -> m "CMET: %d" (Hashtbl.length heap.cmet)));
-      L.(verbose (fun m -> m "SMET: %d" (Hashtbl.length heap.smet)));
-    *)
-
-    (* SERVPIPS (E15): symbolic field names may be substituted *)
-    (if track_order () then
-       let remapped =
-         Hashtbl.fold
-           (fun loc m ac ->
-             if Hashtbl.mem heap.sfvl loc then
-               ( loc,
-                 Expr.Map.fold
-                   (fun k n m' -> Expr.Map.add (le_subst k) n m')
-                   m Expr.Map.empty )
-               :: ac
-             else ac)
-           heap.ord []
-       in
-       List.iter (fun (loc, m) -> Hashtbl.replace heap.ord loc m) remapped);
 
     (* Field-value lists *)
     Hashtbl.iter
@@ -419,29 +495,7 @@ let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
       heap.smet;
 
     (* Now we need to deal with any substitutions in the locations themselves *)
-    let aloc_subst =
-      SSubst.filter subst (fun var _ ->
-          match var with
-          | ALoc _ -> true
-          | _ -> false)
-    in
-    SSubst.iter aloc_subst (fun aloc new_loc ->
-        let aloc =
-          match aloc with
-          | ALoc loc -> loc
-          | _ -> raise (Failure "Impossible by construction")
-        in
-        let new_loc =
-          match (new_loc : Expr.t) with
-          | Lit (Loc loc) -> loc
-          | ALoc loc -> loc
-          | _ ->
-              raise
-                (Failure
-                   (Printf.sprintf "Heap substitution fail for loc: %s"
-                      ((Fmt.to_to_string Expr.pp) new_loc)))
-        in
-        merge_loc heap new_loc aloc))
+    substitute_alocs subst heap)
 
 (** Returns the serialization of --heap-- as a list *)
 let to_list (heap : t) : (string * s_object) list =
