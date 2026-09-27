@@ -515,7 +515,9 @@ module Make (E : X.ENV) = struct
      it, so the conservative serialiser above is used until the
      integration replaces this function by
        (st, ServpipsLazy.Ext.serialize (module E) st v). *)
-  let serialize (st : st) (v : vt) : st * Yojson.Safe.t = vt_of st 0 [] v
+  let serialize (st : st) (v : vt) : st * Yojson.Safe.t =
+    ignore vt_of;
+    (st, ServpipsLazy.Ext.serialize (module E) st v)
 
   (* ------------------------------------------------------------------ *)
   (* servpips_site(fn)                                                   *)
@@ -684,7 +686,15 @@ module Make (E : X.ENV) = struct
             in
             if not (List.mem status end_statuses) then
               fail_err "invalid end status %s (reason %s)" status reason;
-            path_end status reason
+            let outcome =
+              match reg_get st "outcome" with
+              | Some (_, o) -> (
+                  match V.to_literal o with
+                  | Some (String o) -> Some o
+                  | _ -> None)
+              | None -> None
+            in
+            Servpips.end_path ~status ~reason ?outcome ()
         | "outcome", o :: _ ->
             let o = string_arg "outcome" o in
             if not (List.mem o outcomes) then fail_err "invalid outcome %s" o;
@@ -759,7 +769,7 @@ module Make (E : X.ENV) = struct
     let e = e_of b in
     match Expr.to_literal e with
     | Some (Bool true) -> [ X.Return (st, undef) ]
-    | Some (Bool false) -> []
+    | Some (Bool false) -> raise (Servpips.Assume_failed e)
     | Some _ -> fail_err "argument is not a boolean: %s" (pp_v b)
     | None ->
         if not E.symbolic then fail_err "non-literal assume under concrete execution";
@@ -775,7 +785,7 @@ module Make (E : X.ENV) = struct
           fail_err "argument is not known to be a GIL boolean: %s" (pp_v b);
         (match assume_all st [ e ] with
         | Some st -> [ X.Return (st, undef) ]
-        | None -> [])
+        | None -> raise (Servpips.Assume_failed e))
 
   (* ------------------------------------------------------------------ *)
   (* servpips_fn("<name>", a1, ...)                                      *)
