@@ -1,0 +1,22 @@
+(* SERVPIPS-ARGS: -a *)
+(* SERVPIPS WP1 core probe (round 3, from runtime3): a Boolean decision
+   variable t in a formula connected to another variable m, then t itself in
+   the path condition, then a query about m. The solver query keeps the
+   formulas of the relevance closure of m (they mention t) but kept only the
+   type of m: t was declared as a wrapped value and "(assert t)" failed in z3
+   ("term is not Boolean"), ending the t path with an SMT failure (error).
+   Now the types of the whole closure are kept: three paths return. *)
+proc main() {
+          m := fresh_svar();
+          t := fresh_svar();
+          assume_type (t, Bool);
+          assume (((((typeOf m) == Str) ==> (! t)) and ((! ((typeOf m) == Obj)) ==> t)));
+          goto [t] yes no;
+  yes:    goto [((typeOf m) == Num)] num nnum;
+  num:    ret := 1.;
+          goto done;
+  nnum:   ret := 4.;
+          goto done;
+  no:     ret := 3.;
+  done:   return
+};

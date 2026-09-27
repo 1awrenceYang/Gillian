@@ -25,9 +25,25 @@ let simplify_pfs_and_gamma
     (gamma : Type_env.t) : Expr.Set.t * Type_env.t * SESubst.t =
   let pfs, gamma =
     match (relevant_info, !Config.under_approximation) with
-    | Some relevant_info, false ->
-        ( PFS.filter_with_info relevant_info (PFS.of_list fs),
-          Type_env.filter_with_info relevant_info gamma )
+    | Some ((pvars, lvars, locs) as relevant_info), false ->
+        let pfs = PFS.of_list fs in
+        (* SERVPIPS: the formulas are kept for the relevance closure of the
+           query's variables; the types must be kept for the same closure.
+           Upstream kept only the types of the query's own variables, so a
+           Boolean decision variable occurring in a retained formula (e.g.
+           (typeOf m = Str) ==> not t, then t itself) lost its type and was
+           declared as a wrapped value: "term is not Boolean", the path
+           ended with an SMT failure *)
+        let gamma_info =
+          if !Config.servpips_semantics then
+            let pvars', lvars', locs' =
+              PFS.get_relevant_info pvars lvars locs pfs
+            in
+            (SS.union pvars pvars', SS.union lvars lvars', SS.union locs locs')
+          else relevant_info
+        in
+        ( PFS.filter_with_info relevant_info pfs,
+          Type_env.filter_with_info gamma_info gamma )
     | _ -> (PFS.of_list fs, Type_env.copy gamma)
   in
   let subst, _ = Simplifications.simplify_pfs_and_gamma ~matching pfs gamma in
