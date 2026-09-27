@@ -283,10 +283,43 @@ let enum_values (s : J.t) : Expr.t list option =
       | Some j -> Some (lits [ j ])
       | None -> None)
 
+let num_field k (j : J.t) : float option =
+  match field k j with
+  | Some (`Int n) -> Some (float_of_int n)
+  | Some (`Intlit t) -> float_of_string_opt t
+  | Some (`Float f) when Float.is_finite f -> Some f
+  | _ -> None
+
+(** Range facts of a number shape (I3 extension, all optional): [min] /
+    [max] (inclusive), [exclusiveMin] / [exclusiveMax], [int] (an integer),
+    e.g. the numbers of DynamoDB ([exclusiveMin: -1e126, exclusiveMax:
+    1e126]). *)
+let number_range (s : J.t) (x : Expr.t) : Expr.t list =
+  let n f = Expr.Lit (Num f) in
+  let bound k mk = match num_field k s with Some f -> [ mk (n f) ] | None -> [] in
+  bound "min" (fun b -> Expr.BinOp (b, FLessThanEqual, x))
+  @ bound "max" (fun b -> Expr.BinOp (x, FLessThanEqual, b))
+  @ bound "exclusiveMin" (fun b -> Expr.BinOp (b, FLessThan, x))
+  @ bound "exclusiveMax" (fun b -> Expr.BinOp (x, FLessThan, b))
+  @ if bool_field "int" s then [ Expr.UnOp (IsInt, x) ] else []
+
+let conj = function
+  | [] -> true_
+  | x :: rest -> List.fold_left (fun ac y -> Expr.BinOp (ac, And, y)) x rest
+
+let rec conjuncts (e : Expr.t) : Expr.t list =
+  match e with
+  | BinOp (a, And, b) -> conjuncts a @ conjuncts b
+  | e -> [ e ]
+
 (** Disjuncts of the JS type mask of a value of shape [s] (named [x]). The
     constraints used: [type], [enum]/[const], [optional], [nullable],
-    [union.of]; all other keys (pattern, string lengths, defaults, ...) are
-    ignored, which only weakens the mask. *)
+    [union.of], and the range of a number ({!number_range}) when the mask
+    is that number alone: the single disjunct is then the conjunction of
+    its type and range facts (in a disjunction of several types the range
+    facts are dropped: typed comparisons under a disjunction are not
+    handled by the engine's typing); all other keys (pattern, string
+    lengths, defaults, ...) are ignored, which only weakens the mask. *)
 let rec mask_disjuncts (s : J.t) (x : Expr.t) : Expr.t list =
   let s = resolve s in
   let enum_or dflt =
@@ -306,7 +339,8 @@ let rec mask_disjuncts (s : J.t) (x : Expr.t) : Expr.t list =
   let base =
     match type_of s with
     | "string" -> enum_or [ type_atom x StringType ]
-    | "number" -> enum_or [ type_atom x NumberType ]
+    | "number" ->
+        enum_or [ conj (type_atom x NumberType :: number_range s x) ]
     | "boolean" -> enum_or [ type_atom x BooleanType ]
     | "null" -> [ eq x null ]
     | "absent" -> [ eq x undef ]
@@ -324,7 +358,11 @@ let rec mask_disjuncts (s : J.t) (x : Expr.t) : Expr.t list =
     (if bool_field "optional" s then [ eq x undef ] else [])
     @ if bool_field "nullable" s then [ eq x null ] else []
   in
-  List.sort_uniq Expr.compare (base @ extra)
+  match List.sort_uniq Expr.compare (base @ extra) with
+  | [ _ ] as single -> single
+  | ds ->
+      List.sort_uniq Expr.compare
+        (List.map (fun d -> match conjuncts d with t :: _ :: _ -> t | _ -> d) ds)
 
 (* ------------------------------------------------------------------------ *)
 (* Classes                                                                  *)
@@ -532,10 +570,15 @@ let decl_info ?parent_aloc (info : info) : unit =
   emit_decl ?parent_name ?key ?parent_lvar ?parent_aloc ~shape:info.label
     ~open_:(open_json info) ~lvar:info.lvar ~name:info.name ~kind:info.kind ()
 
+(** The type of a mask with a single disjunct whose first conjunct is a
+    type atom (the other conjuncts, e.g. a number range, are facts). *)
 let single_gamma_type = function
-  | [ Expr.BinOp (UnOp (TypeOf, _), Equal, Lit (Type t)) ] -> (
-      match t with
-      | StringType | NumberType | BooleanType | ObjectType -> Some t
+  | [ d ] -> (
+      match conjuncts d with
+      | Expr.BinOp (UnOp (TypeOf, _), Equal, Lit (Type t)) :: _ -> (
+          match t with
+          | StringType | NumberType | BooleanType | ObjectType -> Some t
+          | _ -> None)
       | _ -> None)
   | _ -> None
 
@@ -596,8 +639,13 @@ let new_info ~name ~kind ~(shape : J.t) ~(label : J.t) ?classes ?shape_id ~paren
 let mask_facts (ms : mstate) (info : info) : Expr.t list * (string * Type.t) list =
   match info.gamma_type with
   | Some t ->
-      if Type_env.get ms.gamma info.lvar = Some t then ([], [])
-      else ([], [ (info.lvar, t) ])
+      let facts =
+        match info.mask with
+        | [ d ] -> List.filter (fun f -> not (PFS.mem ms.pfs f)) (List.tl (conjuncts d))
+        | _ -> []
+      in
+      if Type_env.get ms.gamma info.lvar = Some t then (facts, [])
+      else (facts, [ (info.lvar, t) ])
   | None ->
       let f = disj info.mask in
       if PFS.mem ms.pfs f then ([], []) else ([ f ], [])
@@ -767,8 +815,13 @@ let child_facts (ms : mstate) (parent : info) (i : int) (k : string) (child : in
   else
     match List.assoc_opt i contribs with
     | Some s ->
-        let r = disj (mask_disjuncts s (Expr.LVar child.lvar)) in
-        if PFS.mem ms.pfs r then (facts, types, false) else (facts @ [ r ], types, true)
+        let rs =
+          match mask_disjuncts s (Expr.LVar child.lvar) with
+          | [ d ] -> conjuncts d
+          | ds -> [ disj ds ]
+        in
+        let rs = List.filter (fun r -> not (PFS.mem ms.pfs r)) rs in
+        if rs = [] then (facts, types, false) else (facts @ rs, types, true)
     | None -> (facts, types, false)
 
 (* ------------------------------------------------------------------------ *)

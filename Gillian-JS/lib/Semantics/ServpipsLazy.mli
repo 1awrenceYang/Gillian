@@ -194,8 +194,11 @@ module Type_env = Gillian.Symbolic.Type_env
     ids usable without a table: [json any ddb-out string number boolean null
     object array absent]. Shape keys used: [type], [ref], [props],
     [required], [additional], [closed], [items], [len], [minLen], [maxLen],
-    [enum], [const], [optional], [nullable], [of]; others are ignored (only
-    weakening the masks). Unknown [type]s make every use [unsupported]. *)
+    [enum], [const], [optional], [nullable], [of], and for numbers [min],
+    [max] (inclusive), [exclusiveMin], [exclusiveMax] and [int] (range facts
+    of a value whose mask is that number alone; dropped in a union, or with
+    [optional] / [nullable]); others are ignored (only weakening the
+    masks). Unknown [type]s make every use [unsupported]. *)
 val set_shapes : Yojson.Safe.t -> unit
 
 (** Parse and register a shape table text (see the .ml for the compiler's
