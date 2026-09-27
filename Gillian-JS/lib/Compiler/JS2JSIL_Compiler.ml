@@ -2611,7 +2611,9 @@ let rec translate_expr tr_ctx e :
          (Internals.jsil), the ES5 [[Call]] of bound functions for any
          nesting depth (the target of a bound function may be bound itself
          and then has no @scope) *)
-      let sp_bind_cmds =
+      let sp_bind_cmds () =
+        (* a function: no fresh variable is allocated without --servpips
+           (upstream variable numbering is kept) *)
         let x_sp_args = fresh_var () in
         [
           (Some bind, LBasic (Assignment (x_sp_args, EList x_args_gv)));
@@ -2753,7 +2755,7 @@ let rec translate_expr tr_ctx e :
                        (* BIND *)
                      ]
                   @ (if !Gillian.Utils.Config.servpips_semantics then
-                       annotate_cmds sp_bind_cmds
+                       annotate_cmds (sp_bind_cmds ())
                      else
                        annotate_cmds
                          [
