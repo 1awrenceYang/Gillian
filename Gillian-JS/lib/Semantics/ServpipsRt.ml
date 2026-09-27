@@ -510,23 +510,12 @@ module Make (E : X.ENV) = struct
                           ("sym", `List (List.rev sym_j));
                         ] )))
 
-  let serialize (st : st) (v : vt) : st * Yojson.Safe.t =
-    let via_memory =
-      match
-        try S.execute_action "ServpipsSerialize" st [ v ] with
-        | Servpips.Path_end _ as e -> raise e
-        | _ -> []
-      with
-      | [ Ok (st', [ j ]) ] -> (
-          match V.to_literal j with
-          | Some (String text) -> (
-              try Some (st', Yojson.Safe.from_string text) with _ -> None)
-          | _ -> None)
-      | _ -> None
-    in
-    match via_memory with
-    | Some r -> r
-    | None -> vt_of st 0 [] v
+  (* The value tree of E17 is the LazyJSON memory's (WP2,
+     ServpipsLazy.Ext.serialize); this package's branch does not contain
+     it, so the conservative serialiser above is used until the
+     integration replaces this function by
+       (st, ServpipsLazy.Ext.serialize (module E) st v). *)
+  let serialize (st : st) (v : vt) : st * Yojson.Safe.t = vt_of st 0 [] v
 
   (* ------------------------------------------------------------------ *)
   (* servpips_site(fn)                                                   *)
@@ -886,16 +875,25 @@ module Make (E : X.ENV) = struct
       | v :: _ -> v
       | [] -> undef
     in
-    let desc = V.from_list [ vstr "d"; v; vbool true; vbool true; vbool true ] in
-    let st = set_cell st o (vstr k) desc in
-    let st = lazykeys_update st o k ~add:true in
-    [ X.Return (st, undef) ]
+    (* the LazyJSON memory's raw define (not a program write) when present *)
+    match action1 "SpDefine" st [ o; vstr k; v ] with
+    | Some (st, _) -> [ X.Return (st, undef) ]
+    | None ->
+        let desc =
+          V.from_list [ vstr "d"; v; vbool true; vbool true; vbool true ]
+        in
+        let st = set_cell st o (vstr k) desc in
+        let st = lazykeys_update st o k ~add:true in
+        [ X.Return (st, undef) ]
 
   let absent (st : st) (args : vt list) : outcome list =
     let o, k, _ = obj_key_args "absent" args in
-    let st = set_cell st o (vstr k) (lit Nono) in
-    let st = lazykeys_update st o k ~add:false in
-    [ X.Return (st, undef) ]
+    match action1 "SpAbsent" st [ o; vstr k ] with
+    | Some (st, _) -> [ X.Return (st, undef) ]
+    | None ->
+        let st = set_cell st o (vstr k) (lit Nono) in
+        let st = lazykeys_update st o k ~add:false in
+        [ X.Return (st, undef) ]
 
   let mark (st : st) (args : vt list) : outcome list =
     match args with

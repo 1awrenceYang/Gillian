@@ -63,10 +63,11 @@
       is a JS object with own data properties [site], [callee], [api], [sdk]
       (strings), [k] (number), [sent] (boolean) and optionally [phase]
       (["init"|"handler"|"after-settle"], default ["handler"]). [params] is
-      serialised as a value tree VT: with the memory action
-      ["ServpipsSerialize"] ([[v]] -> [[Lit (String json)]]) when the memory
-      provides it (WP2, E17), otherwise with a conservative built-in
-      serialiser (LazyJSON objects become [opaque]).
+      serialised as a value tree VT (section 5.1). The value trees of E17
+      belong to the LazyJSON memory (WP2, [ServpipsLazy.Ext.serialize]);
+      until the packages are integrated a conservative built-in serialiser
+      is used (LazyJSON objects become [opaque], property order is integer
+      keys then heap order).
     - [servpips_emit("note", code, msg, data)]: emits a [note] event
       ([data] as a value tree, [null] if undefined).
     - [servpips_emit("end", status, reason)]: ends the path
@@ -90,7 +91,9 @@
     - [servpips_define(o, k, v)]: writes the data property [k] of [o]
       ([{d, v, true, true, true}]) directly (no [[Put]]) and adds [k] to
       [@sp_lazykeys]. [servpips_absent(o, k)]: writes a tombstone and removes
-      [k] from [@sp_lazykeys].
+      [k] from [@sp_lazykeys]. Both use the LazyJSON memory actions
+      [SpDefine] / [SpAbsent] when the memory provides them (raw writes that
+      are not program writes), otherwise [SetCell] and the metadata.
     - [servpips_mark(o, flag, value)]: sets metadata [@sp_<flag>]; flag in
       [model|resolver|open|kind].
     - [servpips_is_concrete(v)]: [true] iff [v] is a literal (after
