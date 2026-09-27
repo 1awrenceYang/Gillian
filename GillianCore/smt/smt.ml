@@ -1124,9 +1124,37 @@ module Servpips_enc = struct
     | `Native f, xs -> app_ f xs >- spec.ret
 end
 
+(* SERVPIPS: the type guards of the wrapped values that a sub-formula accesses
+   (Encoding.extra_asrts: "N is a string" for ToNumberOp(N) on an untyped N)
+   are asserted at the top level of the query. Under a disjunction, an
+   implication or a negation that makes the query stronger than the formula:
+   in (S <> undefined /\ u = S) \/ u = ToNumberOp(N) the guard of the second
+   disjunct forces N to be a string in every model. In SERVPIPS mode the
+   guards stay inside the operand they come from: (guards /\ operand). *)
+let servpips_guarded (enc : Encoding.t) : Encoding.t =
+  let open Encoding in
+  let b = get_bool enc in
+  match b.extra_asrts with
+  | [] -> b
+  | g :: gs ->
+      let guard = List.fold_left bool_and g gs in
+      { b with expr = bool_and guard b.expr; extra_asrts = [] }
+
 let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
     =
   let open Encoding in
+  match op with
+  | (Or | Impl) when !servpips_mode ->
+      let a = servpips_guarded p1 in
+      let b = servpips_guarded p2 in
+      let e =
+        (match op with
+        | Or -> bool_or a.expr b.expr
+        | _ -> bool_implies a.expr b.expr)
+        >- BooleanType
+      in
+      { e with consts = merge_consts a.consts b.consts }
+  | _ -> (
   let>- _ = p1 in
   let>- _ = p2 in
   (* In the case of strongly typed operations, we do not perform any check.
@@ -1264,11 +1292,18 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | M_atan2
   | M_pow ->
       exceptf "SMT encoding: Costruct not supported yet - binop: %s"
-        (BinOp.str op)
+        (BinOp.str op))
 
 let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   let open Encoding in
   let open Axiomatised_operations in
+  match op with
+  | Not when !servpips_mode ->
+      (* SERVPIPS: see [servpips_guarded] *)
+      let a = servpips_guarded le in
+      let e = bool_not a.expr >- BooleanType in
+      { e with consts = a.consts }
+  | _ -> (
   let>- _ = le in
   match op with
   | IUnaryMinus ->
@@ -1379,7 +1414,7 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
           (UnOp.str op)
       in
       let () = L.print_to_all msg in
-      raise (Failure msg)
+      raise (Failure msg))
 
 let copy_extend_gamma gamma vars =
   (* Start by updating gamma with the information provided by bound / quantifier types.
