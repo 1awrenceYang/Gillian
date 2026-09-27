@@ -1,0 +1,5 @@
+{"ev":"note","code":"vt","msg":"keys","site":null,"data":{"vt":{"t":"val","e":{"pp":"\"2,10,b,a,zz,c\"","ast":["Lit",["String","2,10,b,a,zz,c"]]}}}}
+{"ev":"note","code":"vt","msg":"forin","site":null,"data":{"vt":{"t":"val","e":{"pp":"\"2,10,b,a,zz,c,\"","ast":["Lit",["String","2,10,b,a,zz,c,"]]}}}}
+{"ev":"note","code":"vt","msg":"lit","site":null,"data":{"vt":{"t":"val","e":{"pp":"\"claimId,status,amount\"","ast":["Lit",["String","claimId,status,amount"]]}}}}
+{"ev":"note","code":"vt","msg":"re-added","site":null,"data":{"vt":{"t":"val","e":{"pp":"\"status,amount,claimId\"","ast":["Lit",["String","status,amount,claimId"]]}}}}
+{"ev":"note","code":"vt","msg":"vt","site":null,"data":{"vt":{"t":"obj","aloc":"#loc_197","props":[["2",{"t":"val","e":{"pp":"4.","ast":["Lit",["Num",4.0]]}}],["10",{"t":"val","e":{"pp":"3.","ast":["Lit",["Num",3.0]]}}],["b",{"t":"val","e":{"pp":"1.","ast":["Lit",["Num",1.0]]}}],["a",{"t":"val","e":{"pp":"2.","ast":["Lit",["Num",2.0]]}}],["zz",{"t":"val","e":{"pp":"5.","ast":["Lit",["Num",5.0]]}}],["c",{"t":"val","e":{"pp":"6.","ast":["Lit",["Num",6.0]]}}]],"sym":[]}}}
