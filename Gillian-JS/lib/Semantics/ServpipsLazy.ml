@@ -55,6 +55,24 @@ let sat (ms : mstate) ?(gamma = ms.gamma) (fs : Expr.t list) : bool =
     (fs @ PFS.to_list ms.pfs)
     gamma
 
+(* E13 (round 3): a branch that LazyJSON does not create because its
+   condition [f] is unsatisfiable (with the extra facts [ctx] of the branch,
+   true facts about the input such as a member's type mask) is reported as a
+   [prune] event with dropped side [f], like a dropped side of the
+   interpreter's own branches, so that the converter can certify it *)
+let prune_dropped (ms : mstate) ?(gamma = ms.gamma) ?(ctx = []) (f : Expr.t) =
+  if Servpips.enabled () && not (SS.is_empty (Expr.lvars f)) then
+    Servpips.record_prune ~guard:f ~guard_orig:f ~kept:"else" ~by:"solver"
+      ~pc:(ctx @ PFS.to_list ms.pfs)
+      ~types:(Type_env.to_list_expr gamma) ()
+
+(* [sat] of [f :: ctx], reporting [f] as a dropped side when unsatisfiable *)
+let sat_or_prune (ms : mstate) ?(gamma = ms.gamma) ?(ctx = []) (f : Expr.t) :
+    bool =
+  let r = sat ms ~gamma (f :: ctx) in
+  if not r then prune_dropped ms ~gamma ~ctx f;
+  r
+
 let reduce (ms : mstate) (e : Expr.t) : Expr.t =
   try Reduction.reduce_lexpr ~pfs:ms.pfs ~gamma:ms.gamma e with _ -> e
 
@@ -875,7 +893,7 @@ let materialize (ms : mstate) (info : info) : branch list =
         List.filter
           (fun i ->
             let g = info.classes.(i).guard in
-            Expr.equal g true_ || sat ms [ g ])
+            Expr.equal g true_ || sat_or_prune ms g)
           (List.init n Fun.id)
       in
       let multi = List.length feasible > 1 in
@@ -944,7 +962,7 @@ let member_access (ms : mstate) (info : info) (i : int) (al : string) (k : strin
     | Arr_cls, Sym ->
         let l = Expr.LVar (len_var info c) in
         let idx = Expr.Lit (Num (float_of_string k)) in
-        not (sat ms [ Expr.BinOp (idx, FLessThan, l) ])
+        not (sat_or_prune ms (Expr.BinOp (idx, FLessThan, l)))
     | _ -> false
   in
   match class_member c k with
@@ -957,8 +975,8 @@ let member_access (ms : mstate) (info : info) (i : int) (al : string) (k : strin
       let fork_on ?(known_in = false) f_in f_out =
         (* [f_in]: member present (cell created); [f_out]: absent (none) *)
         let gamma = gamma_with ms types in
-        let ok_in = known_in || sat ms ~gamma (f_in :: facts) in
-        let ok_out = sat ms ~gamma (f_out :: facts) in
+        let ok_in = known_in || sat_or_prune ms ~gamma ~ctx:facts f_in in
+        let ok_out = sat_or_prune ms ~gamma ~ctx:facts f_out in
         (* Never drop the configuration here: if neither side is satisfiable
            the path is infeasible, and it is kept (with the contradictory
            facts) so that the engine's own infeasibility accounting (E13)
@@ -1154,8 +1172,8 @@ let closed_struct_enumeration (ms : mstate) (info : info) (i : int) (loc : strin
           | Some v ->
               let gamma = gamma_with ms types in
               let is_undef = eq v undef in
-              let can_undef = sat ms ~gamma (is_undef :: facts) in
-              let can_def = sat ms ~gamma (not_ is_undef :: facts) in
+              let can_undef = sat_or_prune ms ~gamma ~ctx:facts is_undef in
+              let can_def = sat_or_prune ms ~gamma ~ctx:facts (not_ is_undef) in
               (* never drop the configuration (see member_access) *)
               let can_def = can_def || not can_undef in
               let absent h =
@@ -1242,7 +1260,7 @@ let get_all_props (ms : mstate) (loc : string) :
                        (max_enum_lengths + 1));
                 let feasible =
                   List.filter
-                    (fun n -> sat ms [ eq l (num n) ])
+                    (fun n -> sat_or_prune ms (eq l (num n)))
                     (List.init (max_enum_lengths + 1) Fun.id)
                 in
                 (* never drop the configuration (see member_access) *)
