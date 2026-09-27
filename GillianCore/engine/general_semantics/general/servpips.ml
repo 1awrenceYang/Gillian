@@ -465,6 +465,31 @@ let emit_stats () =
            ("rss_mb", rss_mb ());
          ]))
 
+(* Branch-sharing assertion (diagnostics only; never changes results). *)
+let branch_check_on =
+  lazy
+    (match Sys.getenv_opt "SERVPIPS_BRANCH_CHECK" with
+    | None | Some ("" | "0") -> false
+    | Some _ -> true)
+
+let branch_check () = !enabled_ref && Lazy.force branch_check_on
+
+let heap_mutables : (Obj.t -> (string * Obj.t) list) ref =
+  ref (fun h -> [ ("heap", h) ])
+
+let sharing_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
+let sharing_count = ref 0
+
+let report_sharing ~where (msg : string) =
+  incr sharing_count;
+  let key = where ^ " | " ^ msg in
+  if not (Hashtbl.mem sharing_seen key) then (
+    Hashtbl.replace sharing_seen key ();
+    let msg = truncate_reason ~max:600 (where ^ ": " ^ msg) in
+    prerr_endline ("SERVPIPS branch-sharing: " ^ msg);
+    note ~code:"branch-sharing" ~msg ();
+    set_fatal ("branch-sharing: " ^ msg))
+
 (* Sampling profiler (diagnostics only; never changes results). *)
 let sampling = ref false
 let sample_hook : (unit -> string) ref = ref (fun () -> "")

@@ -267,6 +267,7 @@ module Make (State : SState.S) :
     |> SS.union (Wands.get_lvars wands)
 
   let servpips_pc (astate : t) = State.servpips_pc astate.state
+  let servpips_mutables (astate : t) = State.servpips_mutables astate.state
 
   let to_assertions ?(to_keep : SS.t option) (astate : t) : Asrt.t =
     let { state; preds; wands; pred_defs; _ } = astate in

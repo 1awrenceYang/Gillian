@@ -571,6 +571,11 @@ module Make (SMemory : SMemory.S) :
   let servpips_pc ({ pfs; gamma; _ } : t) =
     (PFS.to_list pfs, Type_env.to_list_expr gamma)
 
+  let servpips_mutables ({ heap; store; pfs; gamma; _ } : t) =
+    (("store", Obj.repr store) :: PFS.servpips_mutables pfs)
+    @ Type_env.servpips_mutables gamma
+    @ !Servpips.heap_mutables (Obj.repr heap)
+
   let evaluate_slcmd (_ : 'a MP.prog) (_ : SLCmd.t) (_ : t) :
       (t, err_t) Res_list.t =
     raise (Failure "ERROR: evaluate_slcmd called for non-abstract execution")

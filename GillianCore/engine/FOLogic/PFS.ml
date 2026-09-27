@@ -44,6 +44,14 @@ let mk lst = { lst; idx = None; gen = fresh_stamp (); src = None }
 let generation (pfs : t) = pfs.gen
 let servpips_set_generation (pfs : t) (g : int) = pfs.gen <- g
 
+let servpips_mutables (pfs : t) =
+  ("pfs", Obj.repr pfs)
+  :: ("pfs.lst", Obj.repr pfs.lst)
+  ::
+  (match pfs.idx with
+  | Some h -> [ ("pfs.idx", Obj.repr h) ]
+  | None -> [])
+
 let invalidate (pfs : t) =
   pfs.idx <- None;
   pfs.gen <- fresh_stamp ();

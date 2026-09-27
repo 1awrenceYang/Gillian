@@ -248,6 +248,33 @@ val fatal : unit -> string option
       "fatal":null|"..","seconds":..,"rss_mb":..}] *)
 val emit_stats : unit -> unit
 
+(** {2 Branch-sharing assertion (diagnostics only)}
+
+    With the environment variable [SERVPIPS_BRANCH_CHECK] set (to anything
+    but [""] or ["0"]) in SERVPIPS mode, the interpreter checks after every
+    step that produced several configurations that no two of them share a
+    mutable part (store, call-stack stores, heap tables, path condition,
+    typing environment; see [State.servpips_mutables]), and that within each
+    one the current store and the stores of its call stack are distinct. A
+    violation is reported by {!report_sharing}. Checking costs time; the
+    results are otherwise unchanged. *)
+
+(** Is the branch-sharing assertion on? *)
+val branch_check : unit -> bool
+
+(** The named mutable parts of a symbolic heap (installed by the memory
+    model, e.g. Gillian-JS's [JSILSMemory] for its [SHeap]); default: the
+    heap value itself. *)
+val heap_mutables : (Obj.t -> (string * Obj.t) list) ref
+
+(** A sharing violation at [where]: [note{branch-sharing}] (once per
+    distinct message), a line on stderr, and [stats.fatal] (first one), so
+    that the run exits with the internal-error code. *)
+val report_sharing : where:string -> string -> unit
+
+(** Number of violations found so far (including repeated ones). *)
+val sharing_count : int ref
+
 (** {2 Sampling profiler (diagnostics only)}
 
     With the environment variable [SERVPIPS_SAMPLE=<file>[:<ms>]] (default

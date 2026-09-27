@@ -1036,3 +1036,28 @@ let () =
           match ServpipsLazy.owner_of_aloc l with
           | Some (owner, _) -> owner <> x
           | None -> true)
+
+(* SERVPIPS (diagnostics): the mutable parts of a symbolic JS heap, for the
+   branch-sharing assertion (Servpips.branch_check, environment variable
+   SERVPIPS_BRANCH_CHECK): every table and reference of the SHeap record.
+   The symbolic state passes its heap; anything that is not an SHeap record
+   (10 fields) is reported as one block. *)
+let () =
+  Gillian.General.Servpips.heap_mutables :=
+    fun h ->
+      if Obj.is_block h && Obj.tag h = 0 && Obj.size h = 10 then
+        let (heap : SHeap.t) = Obj.obj h in
+        [
+          ("heap", h);
+          ("heap.cfvl", Obj.repr heap.cfvl);
+          ("heap.cdom", Obj.repr heap.cdom);
+          ("heap.cmet", Obj.repr heap.cmet);
+          ("heap.sfvl", Obj.repr heap.sfvl);
+          ("heap.sdom", Obj.repr heap.sdom);
+          ("heap.smet", Obj.repr heap.smet);
+          ("heap.cdmn", Obj.repr heap.cdmn);
+          ("heap.sdmn", Obj.repr heap.sdmn);
+          ("heap.ord", Obj.repr heap.ord);
+          ("heap.occ", Obj.repr heap.occ);
+        ]
+      else [ ("heap", h) ]

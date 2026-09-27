@@ -141,6 +141,7 @@ module Make (State : SState.S) = struct
     State.to_assertions ?to_keep state
 
   let servpips_pc ({ state; _ } : t) = State.servpips_pc state
+  let servpips_mutables ({ state; _ } : t) = State.servpips_mutables state
 
   let evaluate_slcmd (prog : 'a MP.prog) (lcmd : SLCmd.t) (bi_state : t) :
       (t, err_t) Res_list.t =

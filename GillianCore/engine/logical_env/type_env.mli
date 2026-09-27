@@ -24,6 +24,10 @@ val generation : t -> int
 val fresh_stamp : unit -> int
 
 val servpips_set_generation : t -> int -> unit
+
+(** SERVPIPS (diagnostics, [Servpips.branch_check]): the mutable blocks of
+    the environment (the record and its table). *)
+val servpips_mutables : t -> (string * Obj.t) list
 val copy : t -> t
 val extend : t -> t -> unit
 val filter : t -> (string -> bool) -> t
