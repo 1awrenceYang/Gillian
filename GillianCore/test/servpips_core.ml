@@ -758,6 +758,21 @@ let test_sat_cache_types () =
   Alcotest.check res "typed Bool again" `Unsat
     (sat ~gamma:[ ("#cb", Type.BooleanType) ] fs)
 
+let test_tostring_typed () =
+  (* SERVPIPS: js.tostring of a typed argument is encoded by the branch of
+     its definition for that type *)
+  let chk name exp fs gamma = Alcotest.check res name exp (sat ~gamma fs) in
+  let ts e = app "js.tostring" [ e ] in
+  chk "string: itself" `Unsat [ Expr.UnOp (Not, eq (ts (lv "#s")) (lv "#s")) ] gs;
+  chk "number 12" `Sat [ eq (ts (lv "#x")) (str "12"); eq (lv "#x") (num 12.) ] gx;
+  chk "number 12, wrong" `Unsat [ eq (ts (lv "#x")) (str "13"); eq (lv "#x") (num 12.) ] gx;
+  chk "boolean false" `Unsat
+    [ eq (ts (lv "#b")) (str "true"); Expr.UnOp (Not, lv "#b") ]
+    [ ("#b", Type.BooleanType) ];
+  chk "untyped string value" `Unsat
+    [ eq (lv "#v") (str "a"); Expr.UnOp (Not, eq (ts (lv "#v")) (str "a")) ]
+    []
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -796,4 +811,5 @@ let tests : unit Alcotest.test_case list =
     ("SERVPIPS: str.len bound and js.num2str length facts", `Quick, test_smt_string_facts);
     ("SERVPIPS: numeric comparisons encode as Booleans", `Quick, test_smt_comparison_kind);
     ("SERVPIPS: the sat cache is keyed by the types", `Quick, test_sat_cache_types);
+    ("SERVPIPS: js.tostring of a typed argument", `Quick, test_tostring_typed);
   ]
