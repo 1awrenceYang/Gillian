@@ -486,6 +486,61 @@ let test_fmod () =
     (field "fmod");
   Alcotest.(check int) "fmod mismatches" 0 !bad
 
+(* ------------------------------------------------------------------ *)
+(* E19: PFS hash index = list semantics                                 *)
+(* ------------------------------------------------------------------ *)
+
+module PFS = Engine.PFS
+
+let test_ext_list_remove_duplicates () =
+  let l = Utils.Ext_list.of_list [ 1; 1; 1; 2; 1; 2 ] in
+  Utils.Ext_list.remove_duplicates l;
+  Alcotest.(check (list int)) "remove_duplicates" [ 1; 2 ] (Utils.Ext_list.to_list l);
+  Alcotest.(check int) "length" 2 (Utils.Ext_list.length l);
+  Utils.Ext_list.append 3 l;
+  Alcotest.(check (list int)) "append after remove_duplicates" [ 1; 2; 3 ]
+    (Utils.Ext_list.to_list l)
+
+let test_pfs_index () =
+  Config.servpips_semantics := true;
+  Random.init 42;
+  let atoms =
+    Array.init 12 (fun i ->
+        match i mod 4 with
+        | 0 -> eq (lv ("#a" ^ string_of_int i)) (num (float_of_int i))
+        | 1 -> Expr.BinOp (lv "#x", FLessThan, num (float_of_int i))
+        | 2 -> eq (lv "#s") (str (string_of_int i))
+        | _ -> Expr.UnOp (Not, eq (lv "#y") (num (float_of_int i))))
+  in
+  let pick () = atoms.(Random.int (Array.length atoms)) in
+  let check pfs =
+    Array.iter
+      (fun f ->
+        let expected = List.exists (Expr.equal f) (PFS.to_list pfs) in
+        if PFS.mem pfs f <> expected then Alcotest.failf "PFS.mem disagrees on %a" Expr.pp f)
+      atoms
+  in
+  for _round = 1 to 200 do
+    let pfs = PFS.init () in
+    for _step = 1 to 30 do
+      (match Random.int 9 with
+      | 0 | 1 | 2 -> PFS.extend pfs (pick ())
+      | 3 -> PFS.filter (fun e -> not (Expr.equal e (pick ()))) pfs
+      | 4 ->
+          PFS.map_inplace
+            (fun e -> if Random.bool () then e else pick ())
+            pfs
+      | 5 ->
+          let c = PFS.copy pfs in
+          PFS.extend c (pick ());
+          check c
+      | 6 -> PFS.merge_into_left pfs (PFS.of_list [ pick (); pick () ])
+      | 7 -> PFS.subst_expr_for_expr (lv "#x") (lv "#y") pfs
+      | _ -> PFS.remove_duplicates pfs);
+      check pfs
+    done
+  done
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -512,4 +567,6 @@ let tests : unit Alcotest.test_case list =
     ("V1b Math.sign vs Node", `Quick, test_unary "sign" (unop M_sgn) ~exact_zero:true);
     ("V1b Math.abs vs Node", `Quick, test_unary "abs" (unop M_abs) ~exact_zero:true);
     ("V1b % (fmod) vs Node", `Quick, test_fmod);
+    ("Ext_list.remove_duplicates keeps the list consistent", `Quick, test_ext_list_remove_duplicates);
+    ("E19 PFS index = list", `Quick, test_pfs_index);
   ]

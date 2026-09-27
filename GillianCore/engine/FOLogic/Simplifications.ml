@@ -22,6 +22,38 @@ type simpl_val_type = {
 let simplification_cache : (simpl_key_type, simpl_val_type) Hashtbl.t =
   Hashtbl.create 1
 
+(* SERVPIPS (E19): the same cache with a hash over every formula of the key.
+   The polymorphic hash only looks at the first few words of the key, so all
+   keys sharing a prefix of their path condition fell into one bucket and each
+   lookup compared (structurally) against many large keys. Equality is the
+   polymorphic [compare = 0], exactly as in the upstream table. *)
+module Servpips_key_tbl = Hashtbl.Make (struct
+  type t = simpl_key_type
+
+  let equal (a : t) (b : t) = compare a b = 0
+
+  let hash (k : t) =
+    let mix h x = (h * 65599) + Hashtbl.hash x in
+    let h = List.fold_left mix 17 k.pfs_list in
+    let h = List.fold_left mix h k.gamma_list in
+    let h = mix h (SS.elements k.existentials) in
+    mix h (k.kill_new_lvars, k.matching, Option.map snd k.save_spec_vars)
+    land max_int
+end)
+
+let servpips_simplification_cache : simpl_val_type Servpips_key_tbl.t =
+  Servpips_key_tbl.create 1024
+
+let simplification_cache_find key =
+  if !Config.servpips_semantics then
+    Servpips_key_tbl.find_opt servpips_simplification_cache key
+  else Hashtbl.find_opt simplification_cache key
+
+let simplification_cache_add key v =
+  if !Config.servpips_semantics then
+    Servpips_key_tbl.replace servpips_simplification_cache key v
+  else Hashtbl.replace simplification_cache key v
+
 (* Reduction of assertions *)
 
 (*************************************)
@@ -327,12 +359,9 @@ let simplify_pfs_and_gamma
       save_spec_vars (* rpfs_lvars = (PFS.lvars rpfs) *);
     }
   in
-  match Hashtbl.mem simplification_cache key with
-  | true ->
+  match simplification_cache_find key with
+  | Some { simpl_gamma; simpl_pfs; simpl_existentials; subst } ->
       (* update_statistics "Simpl: cached" 0.; *)
-      let { simpl_gamma; simpl_pfs; simpl_existentials; subst } =
-        Hashtbl.find simplification_cache key
-      in
       Type_env.reset gamma simpl_gamma;
       PFS.set lpfs simpl_pfs;
 
@@ -342,7 +371,7 @@ let simplify_pfs_and_gamma
         PFS.extend rpfs Expr.true_);
 
       (SESubst.copy subst, simpl_existentials)
-  | false ->
+  | None ->
       L.verbose (fun m -> m "PFS/Gamma simplification:");
       L.verbose (fun m ->
           m "With matching: %s" (if matching then "Yes" else "No"));
@@ -932,7 +961,7 @@ let simplify_pfs_and_gamma
           subst = SESubst.copy result;
         }
       in
-      Hashtbl.replace simplification_cache key cached_simplification;
+      simplification_cache_add key cached_simplification;
 
       (* Utils.Statistics.update_statistics "FOS: SimplifyPFSandGamma"
          (Unix.gettimeofday () -. t); *)

@@ -147,11 +147,15 @@ let remove_duplicates ?(equal = ( = )) l =
               remove_in_rest x whole
             else remove_in_rest x cell.next)
   in
+  (* Continue with the successor as it is after the removals: the successor
+     read before [remove_in_rest] may have been removed from the list, and
+     walking the detached cells used to corrupt [length] and [last] (making
+     later appends invisible). *)
   let rec outer = function
-    | Nil | Cons { next = Nil; _ } -> ()
-    | Cons { contents; next } as cell ->
-        remove_in_rest contents cell;
-        outer next
+    | Nil -> ()
+    | Cons cell as whole ->
+        remove_in_rest cell.contents whole;
+        outer cell.next
   in
   outer l.first
 

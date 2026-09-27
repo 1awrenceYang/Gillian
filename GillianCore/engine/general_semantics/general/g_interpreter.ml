@@ -406,13 +406,26 @@ struct
    * Auxiliary Functions *
    * ******************* *)
 
+  (* SERVPIPS (E19): one-entry memo of the procedure lookup (the same
+     procedure is looked up several times per command); keyed on the program
+     and on the physical identity of the procedure name. *)
+  let get_cmd_memo : (annot MP.prog * string * (annot, int) Proc.t) option ref =
+    ref None
+
   let get_cmd (prog : annot MP.prog) (cs : Call_stack.t) (i : int) :
       string * (Annot.t * int Cmd.t) =
     let pid = Call_stack.get_cur_proc_id cs in
-    let proc = Prog.get_proc prog.prog pid in
+    let proc =
+      match !get_cmd_memo with
+      | Some (p, n, proc) when p == prog && n == pid && Servpips.enabled () ->
+          Some proc
+      | _ -> Prog.get_proc prog.prog pid
+    in
     let proc =
       match proc with
-      | Some proc -> proc
+      | Some proc ->
+          if Servpips.enabled () then get_cmd_memo := Some (prog, pid, proc);
+          proc
       | None -> raise (Failure ("Procedure " ^ pid ^ " does not exist."))
     in
     let annot, _, cmd = proc.proc_body.(i) in
@@ -1320,7 +1333,17 @@ struct
         let servpips_prune ~kept ~by =
           if Servpips.enabled () then
             let guard_orig =
-              let store_subst = Store.to_ssubst (State.get_store state) in
+              (* substitute only the program variables of the guard *)
+              let store = State.get_store state in
+              let store_subst =
+                SVal.SESubst.init
+                  (SS.fold
+                     (fun x acc ->
+                       match Store.get store x with
+                       | Some v -> (Expr.PVar x, Val.to_expr v) :: acc
+                       | None -> acc)
+                     (Expr.pvars e) [])
+              in
               SVal.SESubst.subst_in_expr store_subst ~partial:true e
             in
             let guard = Val.to_expr vt in
@@ -1819,7 +1842,8 @@ struct
         else Nothing
       in
       (* if !Config.stats then Statistics.exec_cmds := !Statistics.exec_cmds + 1; *)
-      MP.update_coverage prog proc_name i;
+      (* SERVPIPS (E19): coverage counts are not used in SERVPIPS mode *)
+      if not (Servpips.enabled ()) then MP.update_coverage prog proc_name i;
 
       log_configuration annot_cmd state cs i b_counter branch_case proc_name
       |> Option.iter (fun report_id ->
