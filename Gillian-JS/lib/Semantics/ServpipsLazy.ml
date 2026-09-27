@@ -952,6 +952,11 @@ let member_access (ms : mstate) (info : info) (i : int) (al : string) (k : strin
         let gamma = gamma_with ms types in
         let ok_in = known_in || sat ms ~gamma (f_in :: facts) in
         let ok_out = sat ms ~gamma (f_out :: facts) in
+        (* Never drop the configuration here: if neither side is satisfiable
+           the path is infeasible, and it is kept (with the contradictory
+           facts) so that the engine's own infeasibility accounting (E13)
+           classifies it, instead of seeing a silent vanishing. *)
+        let ok_in = ok_in || not ok_out in
         let copy h = if ok_in && ok_out then SHeap.copy h else h in
         (if ok_in then
            let h = copy ms.heap in
@@ -977,10 +982,11 @@ let member_access (ms : mstate) (info : info) (i : int) (al : string) (k : strin
             (Expr.BinOp (idx, FLessThan, l))
             (Expr.BinOp (l, FLessThanEqual, idx))
       | _ ->
-          if restricted && not (sat ms ~gamma:(gamma_with ms types) facts) then []
-          else (
-            store_member ms.heap al k child;
-            [ (ms.heap, [ loc; prop; data_desc v ], facts, types) ]))
+          (* a class restriction contradicting the path makes the state
+             infeasible; it is kept (see fork_on) *)
+          ignore restricted;
+          store_member ms.heap al k child;
+          [ (ms.heap, [ loc; prop; data_desc v ], facts, types) ])
 
 let is_pristine_obj (heap : SHeap.t) (al : string) : bool =
   string_set heap al written_key = [] && string_set heap al deleted_key = []
