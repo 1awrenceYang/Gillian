@@ -13,6 +13,12 @@ module X = ServpipsExterns
 let path_end status reason = raise (Servpips.Path_end { status; reason })
 let register_loc = "$lservpips"
 
+(* The runtime hooks, servpips_rejected and the symbolic branching of
+   servpips_tonumber are inert (upstream behaviour, heap untouched) unless
+   SERVPIPS mode is on or the compiled program uses SERVPIPS special forms. *)
+let active () =
+  Servpips.enabled () || !Js2jsil_lib.JS2JSIL_Compiler.servpips_forms_used
+
 (* ------------------------------------------------------------------------ *)
 (* Tables                                                                    *)
 (* ------------------------------------------------------------------------ *)
@@ -929,7 +935,7 @@ module Make (E : X.ENV) = struct
     [ X.Return (st, vbool b) ]
 
   let rejected (st : st) (args : vt list) : outcome list =
-    if Servpips.enabled () then
+    if active () then
       let reason =
         match args with
         | r :: _ -> (
@@ -957,7 +963,7 @@ module Make (E : X.ENV) = struct
     in
     match V.to_literal s with
     | Some _ -> plain ()
-    | None when (not (Servpips.enabled ())) || not E.symbolic -> plain ()
+    | None when (not (active ())) || not E.symbolic -> plain ()
     | None ->
         let app f = Expr.FuncApp (f, [ es ]) in
         let numlit = app "str.in_re.numlit" in
@@ -1165,6 +1171,213 @@ module Make (E : X.ENV) = struct
 end
 
 (* ------------------------------------------------------------------------ *)
+(* JSIL runtime hooks (E11). Light-weight handlers (no functor application): *)
+(* they run on hot paths ([[GetOwnProperty]]).                               *)
+(* ------------------------------------------------------------------------ *)
+
+let hook_action (type st vt)
+    (module E : X.ENV with type st = st and type vt = vt)
+    (name : string) (st : st) (args : vt list) : (st * vt list) option =
+  let res =
+    try E.State.execute_action name st args with
+    | Servpips.Path_end _ as e -> raise e
+    | _ -> []
+  in
+  match res with
+  | [ Ok (st', vs) ] -> Some (st', vs)
+  | _ -> None
+
+type 'vt meta_read = Meta_absent | Meta_value of 'vt | Meta_unknown
+
+(* metadata cell [f] of object [o] *)
+let hook_meta (type st vt)
+    (module E : X.ENV with type st = st and type vt = vt)
+    (st : st) (o : vt) (f : string) : st * vt meta_read =
+  let is_nono v = E.Val.to_literal v = Some Literal.Nono in
+  match hook_action (module E) "GetMetadata" st [ o ] with
+  | Some (st, [ _; m ]) when not (is_nono m) -> (
+      match
+        hook_action (module E) "GetCell" st
+          [ m; E.Val.from_literal (String f) ]
+      with
+      | Some (st, [ _; _; v ]) ->
+          if is_nono v then (st, Meta_absent) else (st, Meta_value v)
+      | _ -> (st, Meta_unknown))
+  | _ -> (st, Meta_unknown)
+
+let is_false (type vt) (module V : Gillian.General.Val.S with type t = vt)
+    (v : vt) =
+  V.to_literal v = Some (Literal.Bool false)
+
+(* servpips_resolver(l): the @sp_resolver of l, or empty *)
+let resolver_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (args : vt list) ->
+        let empty = E.Val.from_literal Literal.Empty in
+        match args with
+        | l :: _ when active () -> (
+            match hook_meta (module E) st l "@sp_resolver" with
+            | st, Meta_value r -> [ X.Return (st, r) ]
+            | st, _ -> [ X.Return (st, empty) ])
+        | _ -> [ X.Return (st, empty) ]);
+  }
+
+(* servpips_lazykey(l, prop): is prop in the @sp_lazykeys of l? (a GIL
+   boolean, symbolic when prop is) *)
+let lazykey_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (args : vt list) ->
+        let ff = E.Val.from_literal (Bool false) in
+        match args with
+        | [ l; prop ] when active () -> (
+            match hook_meta (module E) st l "@sp_lazykeys" with
+            | st, Meta_value keys -> (
+                let pe = E.Val.to_expr prop in
+                let key_exprs =
+                  match E.Val.to_literal keys with
+                  | Some (LList ks) -> Some (List.map (fun k -> Expr.Lit k) ks)
+                  | _ -> (
+                      match E.Val.to_expr keys with
+                      | Expr.EList es | Expr.ESet es -> Some es
+                      | _ -> None)
+                in
+                match key_exprs with
+                | None ->
+                    path_end "unsupported"
+                      ("servpips_lazykey: unexpected @sp_lazykeys "
+                      ^ Fmt.to_to_string E.Val.pp keys)
+                | Some ks -> (
+                    match E.Val.to_literal prop with
+                    | Some p ->
+                        let b =
+                          List.exists
+                            (fun k ->
+                              match k with
+                              | Expr.Lit k -> Literal.equal k p
+                              | _ -> false)
+                            ks
+                        in
+                        if List.for_all (function Expr.Lit _ -> true | _ -> false) ks
+                        then [ X.Return (st, E.Val.from_literal (Bool b)) ]
+                        else
+                          let f =
+                            Expr.disjunct
+                              (List.map (fun k -> Expr.BinOp (pe, Equal, k)) ks)
+                          in
+                          (match E.Val.from_expr f with
+                          | Some v -> [ X.Return (st, v) ]
+                          | None -> path_end "unsupported" "servpips_lazykey: symbolic key set")
+                    | None -> (
+                        let f =
+                          Expr.disjunct
+                            (List.map (fun k -> Expr.BinOp (pe, Equal, k)) ks)
+                        in
+                        match E.Val.from_expr f with
+                        | Some v -> [ X.Return (st, v) ]
+                        | None ->
+                            path_end "unsupported"
+                              "servpips_lazykey: symbolic property name")))
+            | st, Meta_absent -> [ X.Return (st, ff) ]
+            | _, Meta_unknown ->
+                path_end "unsupported"
+                  "servpips_lazykey: cannot read the metadata of an object")
+        | _ -> [ X.Return (st, ff) ]);
+  }
+
+let model_allow = [ "then"; "toJSON"; "inspect"; "constructor" ]
+
+(* servpips_model_miss(l, prop): after a miss on the whole prototype chain
+   of l; ends the path unsupported if the chain contains a model object *)
+let model_miss_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (args : vt list) ->
+        let undef = E.Val.from_literal Literal.Undefined in
+        match args with
+        | [ l; prop ] when active () ->
+            let rec walk st o depth =
+              if depth > 64 then
+                path_end "unsupported" "servpips_model_miss: prototype chain too long"
+              else
+                match hook_meta (module E) st o "@sp_model" with
+                | _, Meta_unknown ->
+                    path_end "unsupported"
+                      "servpips_model_miss: cannot read the metadata of an object"
+                | st, Meta_value v when not (is_false (module E.Val) v) -> (
+                    match E.Val.to_literal prop with
+                    | Some (String p) when List.mem p model_allow ->
+                        [ X.Return (st, undef) ]
+                    | Some (String p) ->
+                        path_end "unsupported"
+                          ("unmodelled member " ^ p ^ " of a model object")
+                    | _ ->
+                        path_end "unsupported"
+                          ("unmodelled member "
+                          ^ Fmt.to_to_string E.Val.pp prop
+                          ^ " of a model object"))
+                | st, _ -> (
+                    match hook_meta (module E) st o "@proto" with
+                    | st, Meta_value p when E.Val.to_literal p <> Some Null ->
+                        walk st p (depth + 1)
+                    | st, _ -> [ X.Return (st, undef) ])
+            in
+            walk st l 0
+        | _ -> [ X.Return (st, undef) ]);
+  }
+
+(* servpips_enum_check(l): enumeration of l (getFields) *)
+let enum_check_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (args : vt list) ->
+        let undef = E.Val.from_literal Literal.Undefined in
+        match args with
+        | l :: _ when active () -> (
+            let flag st f =
+              match hook_meta (module E) st l f with
+              | st, Meta_value v -> (st, Some v)
+              | st, Meta_absent -> (st, None)
+              | _, Meta_unknown ->
+                  path_end "unsupported"
+                    "enumeration: cannot read the metadata of an object"
+            in
+            let st, op = flag st "@sp_open" in
+            let st, md = flag st "@sp_model" in
+            let st, lz = flag st "@sp_lazy" in
+            let set = function
+              | Some v -> not (is_false (module E.Val) v)
+              | None -> false
+            in
+            if set op then path_end "unsupported" "enumeration of an open object"
+            else if set md then
+              path_end "unsupported" "enumeration of a model object"
+            else
+              match lz with
+              | None -> [ X.Return (st, undef) ]
+              | Some _ -> (
+                  let st, cls = flag st "@class" in
+                  match Option.bind cls E.Val.to_literal with
+                  | Some (String "Array") -> [ X.Return (st, undef) ]
+                  | _ ->
+                      path_end "unsupported" "enumeration of an open object"))
+        | _ -> [ X.Return (st, undef) ]);
+  }
+
+(* ------------------------------------------------------------------------ *)
 (* Registration                                                              *)
 (* ------------------------------------------------------------------------ *)
 
@@ -1320,6 +1533,10 @@ let init () =
         ("servpips_arith", arith_h);
         ("servpips_tonumber", tonumber_h);
         ("servpips_rejected", rejected_h);
+        ("servpips_resolver", resolver_h);
+        ("servpips_lazykey", lazykey_h);
+        ("servpips_model_miss", model_miss_h);
+        ("servpips_enum_check", enum_check_h);
       ])
 
 let () = init ()

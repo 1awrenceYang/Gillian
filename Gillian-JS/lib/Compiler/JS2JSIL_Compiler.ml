@@ -864,6 +864,12 @@ let servpips_special_form (f_name : string) : string option =
 
 let servpips_register_loc = "$lservpips"
 
+(** Set when the compiled program uses a SERVPIPS special form
+    ([__servpips_<name>]); read by the runtime hooks of Semantics/ServpipsRt
+    (which are inert for programs without SERVPIPS forms and without
+    --servpips). *)
+let servpips_forms_used = ref false
+
 (** The [__servpips_at] whose CALL is being compiled: the site string and the
     CALL expression itself (compared physically, so that calls nested in the
     callee or argument expressions do not take the register write). *)
@@ -2378,6 +2384,7 @@ let rec translate_expr tr_ctx e :
                 (servpips_site_of_loc js_loc)
                 msg))
       in
+      servpips_forms_used := true;
       match xes with
       | [
        { JS_Parser.Syntax.exp_stx = JS_Parser.Syntax.String site; _ };
@@ -2419,6 +2426,7 @@ let rec translate_expr tr_ctx e :
          externs are dispatched by Semantics/External.ml to the registry in
          Semantics/ServpipsExterns.ml. *)
       let extern_name = Option.get (servpips_special_form f_name) in
+      servpips_forms_used := true;
       let cmds_args, proc_args, errs_args =
         translate_arg_list xes tr_ctx.tr_err_lab
       in

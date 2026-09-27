@@ -16,6 +16,10 @@ import Internals.jsil;
 		then it has additional properties
 *)
 proc i__getFields (l) {
+			  (* SERVPIPS (E11): enumerating an open object (@sp_open, or a
+			     LazyJSON object that is not an array) or a model object
+			     ends the path unsupported *)
+			  ec := extern servpips_enum_check (l);
 			  ret := getFields (l);
 
 			  m := metadata(l);
