@@ -288,8 +288,10 @@ proc put (l, prop, value, thrw) {
     remp:   ret := empty;
     rlab:   return;
 
-    (* SERVPIPS (E10): a rejected [[Put]] ends the path unsupported *)
-    reject: rj := extern servpips_rejected ("put-rejected");
+    (* SERVPIPS (E10): a rejected [[Put]] with Throw = true (strict code or a
+       built-in that throws) throws the TypeError as upstream; with
+       Throw = false (sloppy code) it ends the path unsupported *)
+    reject: rj := extern servpips_rejected ("put-rejected", thrw);
             goto [thrw] tt remp;
     tt:     ret := "TypeError" ();
     elab:   throw
@@ -332,7 +334,9 @@ proc i__hasBinding (l, prop) {
 (* DELETEPROPERTY *)
 (* ************** *)
 
-proc deleteProperty (l, prop, thrw) {
+(* SERVPIPS: [sp_nohook] = true (only the array length truncation of
+   15.4.5.1, which handles the result itself) skips the E10 hook *)
+proc deleteProperty (l, prop, thrw, sp_nohook) {
 			ret := "getOwnProperty" (l, prop) with elab;
 			goto [ret = undefined] dt cont;
 
@@ -346,9 +350,12 @@ proc deleteProperty (l, prop, thrw) {
 	df:		ret := false;
 	rlab:   return;
 
-    (* SERVPIPS (E10): a rejected [[Delete]] ends the path unsupported *)
-    reject: rj := extern servpips_rejected ("delete-rejected");
-            goto [thrw] tt df;
+    (* SERVPIPS (E10): a rejected [[Delete]] with Throw = true (strict code
+       or a built-in that throws) throws the TypeError as upstream; with
+       Throw = false (sloppy code) it ends the path unsupported *)
+    reject: goto [sp_nohook = true] rjn rjh;
+    rjh:    rj := extern servpips_rejected ("delete-rejected", thrw);
+    rjn:    goto [thrw] tt df;
 
     tt:     ret := "TypeError" ();
     elab:   throw
@@ -915,9 +922,10 @@ proc i__putValue (v, w) {
             ret := fun (xsc, rbase, w) with elab;
             goto dflt;
 
-	(* SERVPIPS (E10): a rejected [[Put]] on a primitive base ends the path
-	   unsupported *)
-	reject: rj := extern servpips_rejected ("put-rejected");
+	(* SERVPIPS (E10): a rejected [[Put]] on a primitive base (8.7.2) throws
+	   the TypeError in strict code; in sloppy code (where it has no effect)
+	   it ends the path unsupported. Upstream always throws. *)
+	reject: rj := extern servpips_rejected ("put-rejected", rstrict);
 			ret := "TypeError" ();
     		goto elab
 };

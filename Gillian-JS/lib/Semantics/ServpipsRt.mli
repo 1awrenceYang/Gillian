@@ -155,10 +155,13 @@
       concrete ToNumber; symbolic under [--servpips] -> the four branches of
       section 4.4 (NaN / +Infinity / -Infinity / [ToNumberOp s]) with their
       axioms; without [--servpips], [ToNumberOp s] (upstream behaviour).
-    - [servpips_rejected(reason)] (JSIL [put], [deleteProperty],
-      [i__putValue] rejection): ends the path [unsupported(reason)];
-      otherwise (inactive, see below) returns [undefined] and the runtime
-      continues as upstream.
+    - [servpips_rejected(reason, thrw)] (JSIL [put], [deleteProperty],
+      [i__putValue] rejection; [thrw] is the Throw flag, i.e. the strictness
+      of the code for the compiled [delete] / assignment, [true] for the
+      built-ins that throw): [thrw = true] returns [undefined] and the
+      runtime throws the TypeError (exact, as upstream); otherwise (sloppy
+      code) ends the path [unsupported(reason)]. Inactive (see below):
+      returns [undefined] and the runtime continues as upstream.
     - [servpips_enabled()] (JSIL runtime): [true] iff the SERVPIPS semantics
       is on ([--servpips], wpst or exec). [i__callTarget] (Internals.jsil)
       uses it to call bound functions from the runtime (Array higher-order

@@ -180,7 +180,7 @@ proc a__defineOwnProperty (l, prop, desc, thrw) {
 	loop:	goto [newLen < oldLen] head slm;
 	head:	oldLen := oldLen - 1;
 			ret := "i__toString" (oldLen) with elab;
-			ret := "deleteProperty" (l, ret, false) with elab;
+			ret := "deleteProperty" (l, ret, false, true) with elab;
 			goto [ret = false] fix next;
 
 	fix:	dv := oldLen + 1;

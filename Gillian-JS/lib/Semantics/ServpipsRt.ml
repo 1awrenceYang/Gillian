@@ -1037,17 +1037,28 @@ module Make (E : X.ENV) = struct
     in
     [ X.Return (st, vbool b) ]
 
+  (* E10 (coordinator decision E10-strict): [servpips_rejected(reason,
+     thrw)]. A rejection with Throw = true (strict code, or a built-in whose
+     [[Put]]/[[Delete]] throws) has one exact meaning, the TypeError the
+     runtime throws next: the extern returns. With Throw = false (sloppy
+     code), or a Throw that is not the literal true, the path ends
+     unsupported(reason). *)
   let rejected (st : st) (args : vt list) : outcome list =
     if active () then
-      let reason =
+      let reason, thrw =
         match args with
-        | r :: _ -> (
-            match V.to_literal r with
-            | Some (String s) -> s
-            | _ -> pp_v r)
-        | [] -> "rejected"
+        | r :: rest -> (
+            ( (match V.to_literal r with
+              | Some (String s) -> s
+              | _ -> pp_v r),
+              match rest with
+              | t :: _ -> V.to_literal t
+              | [] -> None ))
+        | [] -> ("rejected", None)
       in
-      path_end "unsupported" reason
+      match thrw with
+      | Some (Bool true) -> [ X.Return (st, undef) ]
+      | _ -> path_end "unsupported" reason
     else [ X.Return (st, undef) ]
 
   (* ------------------------------------------------------------------ *)
