@@ -6,9 +6,9 @@
    is the string member). A key of no member (closed struct) is undefined
    and does not exist. The value tree of the view reports the wrapped key
    as written (the program sees the wrapper, not the string), the others
-   are the input's own members. A prefetched member of a view that is not
-   yet materialised is the same variable. An array view defines its length
-   non-enumerable. */
+   are the input's own members (also a member object materialised by a
+   read). A prefetched member of a view that is not yet materialised is the
+   same variable. An array view defines its length non-enumerable. */
 __servpips_shapes('{"R":{"type":"object","props":{"Body":{"type":"string"},"ContentType":{"type":"string"},"Metadata":{"type":"object","additional":{"type":"string","optional":true}}},"required":["Body"],"additional":"absent"}}');
 function blob(src) {
   var b = {};
@@ -35,6 +35,8 @@ __servpips_debug_vt("body source", body.__sp$src);
 __servpips_debug_vt("prefetched = read", pre === r.ContentType);
 __servpips_debug_vt("no member", [r.Nope, "Nope" in r]);
 if ("ContentType" in r && r.Metadata !== undefined) {
+  var owner = r.Metadata.owner;
+  __servpips_debug_vt("read only", r);
   r.Metadata.owner = "me";
   __servpips_debug_vt("response", r, true);
 }

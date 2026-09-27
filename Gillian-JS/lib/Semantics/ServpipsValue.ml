@@ -292,11 +292,25 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
         | Some { SL.resolver = Some _; _ }, Some info ->
             let lazykeys = set SL.lazykeys_key in
             let own_member k (v : Expr.t) =
+              let named c =
+                match SL.find c with
+                | Some ci -> ci.name = SL.member_path info.name k
+                | None -> false
+              in
+              let at_loc l =
+                match SL.owner_of_aloc l with
+                | Some (c, _) -> named c
+                | None -> false
+              in
               match v with
               | LVar c -> (
-                  match SL.find c with
-                  | Some ci -> ci.name = SL.member_path info.name k
-                  | None -> false)
+                  named c
+                  ||
+                  (* a lazy member materialised on this path *)
+                  match SL.reduce ms v with
+                  | ALoc l | Lit (Loc l) -> at_loc l
+                  | _ -> false)
+              | ALoc l | Lit (Loc l) -> at_loc l
               | Lit Undefined -> List.mem k lazykeys
               | _ -> false
             in
@@ -307,7 +321,7 @@ let serialize_ms (ms : SL.mstate) (v : Expr.t) : J.t =
                 &&
                 match SL.cell heap l (SL.str k) with
                 | Some (EList [ Lit (String "d"); v; _; _; _ ]) ->
-                    not (own_member k (SL.reduce ms v))
+                    not (own_member k v)
                 | Some (Lit Nono) | None -> false
                 | Some _ -> true)
               order
