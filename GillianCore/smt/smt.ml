@@ -30,6 +30,21 @@ let () = Sys.(set_signal sigpipe Signal_ignore)
 
 exception SMT_unknown
 
+(* SERVPIPS (E3). In SERVPIPS mode a query answered [unknown] is not an error:
+   [check_sat] returns [Some unknown_model] (callers treat it as satisfiable /
+   not entailed and report it), and any failure while encoding a query is
+   reported as [SMT_encoding_failure]. *)
+let servpips_mode = ref false
+let query_count = ref 0
+
+exception SMT_encoding_failure of string
+
+let unknown_model = Sexplib.Sexp.Atom "servpips:unknown"
+
+let is_unknown_model = function
+  | Sexplib.Sexp.Atom "servpips:unknown" -> true
+  | _ -> false
+
 let pp_sexp = Sexplib.Sexp.pp_hum
 let ( <| ) constr e = app constr [ e ]
 let ( $$ ) constr l = app constr l
@@ -1598,11 +1613,18 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
   in
   let () = reset_solver () in
   with_necessary_usr_datatypes @@ fun () ->
-  let encoded_assertions, necessary_definitions = encode_assertions fs gamma in
+  let encoded_assertions, necessary_definitions =
+    if !servpips_mode then
+      try encode_assertions fs gamma with
+      | (Out_of_memory | Stack_overflow | Sys.Break) as e -> raise e
+      | e -> raise (SMT_encoding_failure (Printexc.to_string e))
+    else encode_assertions fs gamma
+  in
   let () = if !Config.dump_smt then Dump.dump fs gamma encoded_assertions in
   let () = emit_definitions ~emit:cmd necessary_definitions in
   let () = List.iter cmd encoded_assertions in
   L.verbose (fun fmt -> fmt "Reached SMT.");
+  incr query_count;
   let result = check !solver in
   L.verbose (fun m ->
       let r =
@@ -1614,6 +1636,7 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
       m "The solver returned: %s" r);
   let ret =
     match result with
+    | Unknown when !servpips_mode -> Some unknown_model
     | Unknown ->
         if !Config.under_approximation then raise SMT_unknown
         else

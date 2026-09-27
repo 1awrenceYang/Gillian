@@ -81,7 +81,32 @@ module Make
       in
       Gillian_result.analysis_failure ~in_target:e.proc ?loc:e.loc msg
 
+    (* SERVPIPS (E1): paths are reported as streamed [end] events by the
+       interpreter (final states are not kept); only [stats] is emitted
+       here. Fatal errors ([Stack_overflow], [Out_of_memory], exceptions that
+       escaped the per-configuration handlers) go to [stats.fatal]. *)
+    let run_main_servpips prog init_data : unit Gillian_result.t =
+      let () =
+        try
+          let (_ : _ list) =
+            S_interpreter.evaluate_proc
+              (fun x -> x)
+              prog !Config.entry_point [] (SState.init init_data)
+          in
+          ()
+        with
+        | Stack_overflow -> Servpips.set_fatal "Stack_overflow"
+        | Out_of_memory -> Servpips.set_fatal "Out_of_memory"
+        | e -> Servpips.set_fatal ("uncaught exception: " ^ Printexc.to_string e)
+      in
+      Servpips.emit_stats ();
+      Printf.printf "Total time (Compilation + Symbolic testing): %fs\n"
+        (Unix.gettimeofday () -. !start_time);
+      Fmt.pr "SERVPIPS: symbolic execution done@\n@?";
+      Ok ()
+
     let run_main prog init_data : unit Gillian_result.t =
+      if Servpips.enabled () then run_main_servpips prog init_data else
       let all_results =
         let open Syntaxes.List in
         let+ result_before_leak_check =
@@ -248,6 +273,15 @@ module Make
     let r =
       Gillian_result.try_ @@ fun () ->
       process_files files already_compiled outfile_opt incremental
+    in
+    (* SERVPIPS: the last line of the JSONL is always a [stats] event, also
+       when compilation (or anything before symbolic execution) failed. *)
+    let () =
+      if Servpips.enabled () then (
+        (match r with
+        | Error e -> Servpips.set_fatal (Gillian_result.Error.show_brief e)
+        | Ok () -> ());
+        Servpips.emit_stats ())
     in
     let () = if stats then L.Statistics.print_statistics () in
     let () = Common_args.exit_on_error r in
