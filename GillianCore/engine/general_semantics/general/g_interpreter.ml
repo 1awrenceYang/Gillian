@@ -810,6 +810,61 @@ struct
       @param i Current index
       @return List of configurations resulting from the evaluation *)
 
+  (* SERVPIPS (E13 noise): the guard of a decision with the parts that
+     are constant whatever its logical variables are replaced by their
+     value: the element of a list literal at a literal index
+     (l-nth({{x, loc}}, 1) is loc), and the comparison of a term whose type
+     is known without any context with [empty] (a Boolean, number, string,
+     list, ... term is never empty: ((x == null) == empty) is false). The
+     JSIL runtime tests such guards on every property access; they are
+     decided by the reduction whatever the path, and a prune is only
+     reported when a logical variable remains in the guard. *)
+  let servpips_constant_parts (e : Expr.t) : Expr.t =
+    let empty_gamma = Type_env.init () in
+    let known_non_empty (x : Expr.t) =
+      match Typing.type_lexpr empty_gamma x with
+      | Some t, true -> t <> Type.EmptyType
+      | _ -> false
+      | exception _ -> false
+    in
+    let nth (type a) (l : a list) (i : int) : a option =
+      if i >= 0 && i < List.length l then Some (List.nth l i) else None
+    in
+    let lit_index (i : Expr.t) =
+      match i with
+      | Lit (Int z) when Z.fits_int z -> Some (Z.to_int z)
+      | Lit (Num f) when Float.is_integer f && Float.abs f < 1e9 ->
+          Some (int_of_float f)
+      | _ -> None
+    in
+    let rec f (e : Expr.t) : Expr.t =
+      match e with
+      | BinOp (l, LstNth, i) -> (
+          let l = f l and i = f i in
+          match (l, lit_index i) with
+          | EList es, Some n -> (
+              match nth es n with
+              | Some x -> x
+              | None -> BinOp (l, LstNth, i))
+          | Lit (LList ls), Some n -> (
+              match nth ls n with
+              | Some x -> Lit x
+              | None -> BinOp (l, LstNth, i))
+          | _ -> BinOp (l, LstNth, i))
+      | BinOp (a, Equal, b) -> (
+          let a = f a and b = f b in
+          match (a, b) with
+          | Lit Empty, x when known_non_empty x -> Expr.false_
+          | x, Lit Empty when known_non_empty x -> Expr.false_
+          | _ -> BinOp (a, Equal, b))
+      | BinOp (a, op, b) -> BinOp (f a, op, f b)
+      | UnOp (op, a) -> UnOp (op, f a)
+      | NOp (op, l) -> NOp (op, List.map f l)
+      | EList l -> EList (List.map f l)
+      | _ -> e
+    in
+    try f e with _ -> e
+
   module Evaluate_cmd = struct
     type make_confcont =
       state:state_t ->
@@ -1461,7 +1516,7 @@ struct
             in
             let guard = Val.to_expr vt in
             if
-              (not (SS.is_empty (Expr.lvars guard_orig)))
+              (not (SS.is_empty (Expr.lvars (servpips_constant_parts guard_orig))))
               || not (SS.is_empty (Expr.lvars guard))
             then
               (* a decision that holds without any context needs no pc *)
