@@ -65,4 +65,29 @@ if (c === 0) {
   var ok = { a: 1 };
   ok.a = 2; delete ok.a;
   show("ordinary", [ok.a, "a" in ok]);
+} else if (c === 10) {
+  /* the other rejections of [[CanPut]]: a new property of a non-extensible
+     object, an accessor without setter; delete of a non-configurable
+     built-in property: TypeError in strict code */
+  var ne = Object.preventExtensions({ a: 1 });
+  var acc = {};
+  Object.defineProperty(acc, "g", { get: function () { return 1; }, configurable: true });
+  var r10 = (function () {
+    "use strict";
+    var out = [];
+    try { ne.b = 2; out.push("ne-returned"); } catch (e) { out.push(e instanceof TypeError); }
+    try { acc.g = 2; out.push("acc-returned"); } catch (e) { out.push(e instanceof TypeError); }
+    try { delete Math.PI; out.push("builtin-delete-returned"); } catch (e) { out.push(e instanceof TypeError); }
+    return out;
+  })();
+  show("strict-other", r10);
+} else if (c === 11) {
+  var ne11 = Object.preventExtensions({ a: 1 });
+  ne11.b = 2;
+  show("sloppy-nonextensible-returned", ne11.b);
+} else if (c === 12) {
+  var acc12 = {};
+  Object.defineProperty(acc12, "g", { get: function () { return 1; } });
+  acc12.g = 2;
+  show("sloppy-accessor-returned", acc12.g);
 }
