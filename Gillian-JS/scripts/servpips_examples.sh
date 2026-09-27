@@ -149,7 +149,9 @@ open(sys.argv[3], 'w').write('\n'.join(difflib.unified_diff(e, a, 'expected', 'a
 print('different')
 PY
 )
-  if [ "$verdict" = same ] && [ "$rc" = "$exp_rc" ]; then
+  if [ "$UPDATE" = 1 ]; then
+    echo "UPDATED (rc=$rc, expected rc $exp_rc)" > "$WORK/res/$name.status"
+  elif [ "$verdict" = same ] && [ "$rc" = "$exp_rc" ]; then
     echo PASS > "$WORK/res/$name.status"
   elif [ "$verdict" = same ]; then
     echo "FAIL (rc=$rc, expected $exp_rc)" > "$WORK/res/$name.status"
@@ -188,7 +190,7 @@ for t in "${TESTS[@]}"; do
   st=$(cat "$WORK/res/$t.status" 2>/dev/null || echo "FAIL (no result)")
   echo "$st $t"
   case "$st" in
-    PASS) PASS=$((PASS + 1)) ;;
+    PASS|UPDATED*) PASS=$((PASS + 1)) ;;
     *) FAIL=$((FAIL + 1))
        if [ "$VERBOSE" = 1 ]; then
          [ -f "$WORK/run/$t/diff.txt" ] && { sed 's/^/    /' "$WORK/run/$t/diff.txt"; echo; }

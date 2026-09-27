@@ -1,0 +1,4 @@
+{"ev":"decl","lvar":"#gen__0","name":"module.init","sort":"Str","kind":"env","parent":null,"key":null,"parent_lvar":null,"parent_aloc":null,"shape":null,"open":null,"site":null,"k":null}
+{"ev":"decl","lvar":"#gen__1","name":"module.value","sort":"Str","kind":"input","parent":null,"key":null,"parent_lvar":null,"parent_aloc":null,"shape":null,"open":null,"site":null,"k":null}
+{"ev":"note","code":"init","msg":"","site":null,"data":{"t":"val","e":{"pp":"\"cfg\"","ast":["Lit",["String","cfg"]]}}}
+{"ev":"note","code":"nonempty","msg":"","site":null,"data":{"t":"val","e":{"pp":"#gen__1","ast":["LVar","#gen__1"]}}}

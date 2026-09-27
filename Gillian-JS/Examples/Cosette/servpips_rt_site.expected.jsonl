@@ -1,0 +1,8 @@
+{"ev":"note","code":"uuidv4","msg":"app.js:10:23:31","site":null,"data":null}
+{"ev":"note","code":"putObject","msg":"app.js:10:2:40","site":null,"data":null}
+{"ev":"note","code":"putObject-again","msg":"null","site":null,"data":null}
+{"ev":"note","code":"get","msg":"null","site":null,"data":null}
+{"ev":"note","code":"get","msg":"null","site":null,"data":null}
+{"ev":"note","code":"get","msg":"null","site":null,"data":null}
+{"ev":"note","code":"get","msg":"app.js:15:2:10","site":null,"data":null}
+{"ev":"note","code":"Client","msg":"app.js:17:10:22","site":null,"data":null}

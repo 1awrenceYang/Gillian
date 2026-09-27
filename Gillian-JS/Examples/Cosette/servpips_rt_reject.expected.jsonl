@@ -1,0 +1,5 @@
+{"ev":"decl","lvar":"#gen__0","name":"case","sort":"Num","kind":"input","parent":null,"key":null,"parent_lvar":null,"parent_aloc":null,"shape":null,"open":null,"site":null,"k":null}
+{"ev":"end","status":"unsupported","reason":"put-rejected","outcome":null,"pc":[{"pp":"(#gen__0 == 0.)","ast":["BinOp",["LVar","#gen__0"],["Equal"],["Lit",["Num",0.0]]]}],"types":[[{"pp":"#gen__0","ast":["LVar","#gen__0"]},"Num"]]}
+{"ev":"end","status":"unsupported","reason":"delete-rejected","outcome":null,"pc":[{"pp":"(#gen__0 == 1.)","ast":["BinOp",["LVar","#gen__0"],["Equal"],["Lit",["Num",1.0]]]}],"types":[[{"pp":"#gen__0","ast":["LVar","#gen__0"]},"Num"]]}
+{"ev":"end","status":"unsupported","reason":"put-rejected","outcome":null,"pc":[{"pp":"(#gen__0 == 2.)","ast":["BinOp",["LVar","#gen__0"],["Equal"],["Lit",["Num",2.0]]]}],"types":[[{"pp":"#gen__0","ast":["LVar","#gen__0"]},"Num"]]}
+{"ev":"note","code":"ordinary","msg":"","site":null,"data":{"t":"arr","aloc":"#loc_211","items":[{"t":"val","e":{"pp":"undefined","ast":["Lit",["Undefined"]]}},{"t":"val","e":{"pp":"false","ast":["Lit",["Bool",false]]}}],"len":null}}
