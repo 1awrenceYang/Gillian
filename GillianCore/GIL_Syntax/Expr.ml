@@ -554,7 +554,32 @@ let loc_from_loc_name (loc_name : string) : t =
 
 (** {2 Visitors} *)
 
+(* SERVPIPS (E7): a NaN literal anywhere in [e] (symbolic numbers are finite,
+   A6, so only a literal can make a comparison involve NaN) *)
+let rec servpips_has_nan (e : t) : bool =
+  let rec lit_nan (l : Literal.t) =
+    match l with
+    | Num f -> Float.is_nan f
+    | LList ls -> List.exists lit_nan ls
+    | _ -> false
+  in
+  match e with
+  | Lit l -> lit_nan l
+  | PVar _ | LVar _ | ALoc _ -> false
+  | UnOp (_, e) | Exists (_, e) | ForAll (_, e) -> servpips_has_nan e
+  | BinOp (a, _, b) -> servpips_has_nan a || servpips_has_nan b
+  | LstSub (a, b, c) -> servpips_has_nan a || servpips_has_nan b || servpips_has_nan c
+  | NOp (_, l) | EList l | ESet l | ConstructorApp (_, l) | FuncApp (_, l) ->
+      List.exists servpips_has_nan l
+  | Cases (e, cs) ->
+      servpips_has_nan e || List.exists (fun (_, _, e) -> servpips_has_nan e) cs
+
 let push_in_negations, negate =
+  (* SERVPIPS (E7): not (a < b) is b <= a only when neither side is NaN *)
+  let total_order_ok e1 e2 =
+    (not !Config.servpips_semantics)
+    || not (servpips_has_nan e1 || servpips_has_nan e2)
+  in
   let rec f_off = function
     | BinOp (a1, And, a2) -> BinOp (f_off a1, And, f_off a2)
     | BinOp (a1, Or, a2) -> BinOp (f_off a1, Or, f_off a2)
@@ -568,9 +593,11 @@ let push_in_negations, negate =
     | BinOp (a1, Or, a2) -> BinOp (f_on a1, And, f_on a2)
     | BinOp (a1, Impl, a2) -> BinOp (f_off a1, And, f_on a2)
     | BinOp (e1, ILessThan, e2) -> BinOp (e2, ILessThanEqual, e1)
-    | BinOp (e1, FLessThan, e2) -> BinOp (e2, FLessThanEqual, e1)
+    | BinOp (e1, FLessThan, e2) when total_order_ok e1 e2 ->
+        BinOp (e2, FLessThanEqual, e1)
     | BinOp (e1, ILessThanEqual, e2) -> BinOp (e2, ILessThan, e1)
-    | BinOp (e1, FLessThanEqual, e2) -> BinOp (e2, FLessThan, e1)
+    | BinOp (e1, FLessThanEqual, e2) when total_order_ok e1 e2 ->
+        BinOp (e2, FLessThan, e1)
     | Lit (Bool b) -> Lit (Bool (not b))
     | UnOp (Not, a) -> f_off a
     | Exists (bt, a) -> ForAll (bt, f_on a)
