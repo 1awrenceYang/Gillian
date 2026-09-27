@@ -1408,19 +1408,6 @@ module Servpips_enc = struct
       | Some t -> get_native_of_type t a
       | None -> extend_wrap a
     in
-    (* js.tostring of an argument whose sort is known (typed by the typing
-       environment): the branch of its definition for that sort, instead of
-       the definition over every JS value (whose numeric branch z3 has to
-       rule out on each use) *)
-    match (name, args) with
-    | "js.tostring", [ { kind = Native StringType; _ } as a ] -> a
-    | "js.tostring", [ ({ kind = Native NumberType; _ } as a) ] ->
-        let>- a = a in
-        num_to_str a.expr >- StringType
-    | "js.tostring", [ ({ kind = Native BooleanType; _ } as a) ] ->
-        let>- a = a in
-        ite a.expr (string_k "true") (string_k "false") >- StringType
-    | _ ->
     let>-- args = List.map2 native_or_any spec.args args in
     let xs = List.map (fun (a : Encoding.t) -> a.expr) args in
     match (spec.smt, xs) with
