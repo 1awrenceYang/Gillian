@@ -54,6 +54,43 @@ let simplification_cache_add key v =
     Servpips_key_tbl.replace servpips_simplification_cache key v
   else Hashtbl.replace simplification_cache key v
 
+(* SERVPIPS (E19): the symbolic state is simplified before every memory
+   action, usually with the path condition and the type environment unchanged
+   since the previous time. When a call was answered by the cache for key [k]
+   and left the formulae and the environment exactly as [k] (a fixpoint, list
+   order included), every later call on the same, unmodified objects
+   (generations unchanged) builds the same key [k] and gets the same cached
+   answer; [servpips_memo] returns that answer without building and hashing
+   the key. "Unmodified" is decided by the stamps of the formula set and the
+   environment ([PFS.generation], [Type_env.generation]: fresh at every
+   mutation, kept by copies, so equal stamps mean equal contents in the same
+   order). Only for calls without [rpfs] and [existentials]. *)
+type servpips_memo = {
+  m_pgen : int;
+  m_ggen : int;
+  m_kill : bool option;
+  m_matching : bool;
+  m_save : (SS.t * bool) option;
+  m_value : simpl_val_type;
+}
+
+let servpips_memo_slot : servpips_memo option ref = ref None
+
+let servpips_memo_find ~kill_new_lvars ~matching ~save_spec_vars lpfs gamma =
+  match !servpips_memo_slot with
+  | Some m
+    when PFS.generation lpfs = m.m_pgen
+         && Type_env.generation gamma = m.m_ggen
+         && m.m_kill = kill_new_lvars && m.m_matching = matching
+         && Option.equal
+              (fun (a, b) (c, d) -> SS.equal a c && b = d)
+              m.m_save save_spec_vars -> Some m.m_value
+  | _ -> None
+
+let servpips_same_lists (k : simpl_key_type) pfs gamma =
+  List.equal (fun a b -> a == b || Expr.equal a b) k.pfs_list pfs
+  && List.equal (fun a b -> a == b || a = b) k.gamma_list gamma
+
 (* Reduction of assertions *)
 
 (*************************************)
@@ -336,6 +373,7 @@ let _resolve_set_existentials
     @param vars_to_save Logical variables that cannot be deleted
     @return Substitution from logical variables to logical expressions *)
 let simplify_pfs_and_gamma
+    ?(servpips_memo = false)
     ?(matching = false)
     ?(kill_new_lvars : bool option)
     ?(save_spec_vars : (SS.t * bool) option)
@@ -344,6 +382,18 @@ let simplify_pfs_and_gamma
     ?(rpfs : PFS.t option)
     (gamma : Type_env.t) : SESubst.t * SS.t =
   (* let t = Unix.gettimeofday () in *)
+  let servpips_memo_ok =
+    servpips_memo && !Config.servpips_semantics && Option.is_none rpfs
+    && Option.is_none existentials
+  in
+  match
+    if servpips_memo_ok then
+      servpips_memo_find ~kill_new_lvars ~matching ~save_spec_vars lpfs gamma
+    else None
+  with
+  | Some { subst; simpl_existentials; _ } ->
+      (SESubst.copy subst, simpl_existentials)
+  | None -> (
   let rpfs : PFS.t = Option.value ~default:(PFS.init ()) rpfs in
   let existentials : SS.t ref =
     ref (Option.value ~default:SS.empty existentials)
@@ -360,7 +410,7 @@ let simplify_pfs_and_gamma
     }
   in
   match simplification_cache_find key with
-  | Some { simpl_gamma; simpl_pfs; simpl_existentials; subst } ->
+  | Some ({ simpl_gamma; simpl_pfs; simpl_existentials; subst } as cached) ->
       (* update_statistics "Simpl: cached" 0.; *)
       Type_env.reset gamma simpl_gamma;
       PFS.set lpfs simpl_pfs;
@@ -369,6 +419,24 @@ let simplify_pfs_and_gamma
       if PFS.length lpfs > 0 && PFS.get_nth 0 lpfs == Some Expr.false_ then (
         PFS.clear rpfs;
         PFS.extend rpfs Expr.true_);
+
+      (* SERVPIPS (E19): remember a fixpoint answer (see [servpips_memo]) *)
+      (if servpips_memo_ok then
+         if
+           servpips_same_lists key simpl_pfs simpl_gamma
+           && servpips_same_lists key (PFS.to_list lpfs)
+                (Type_env.to_list gamma)
+         then
+           servpips_memo_slot :=
+             Some
+               {
+                 m_pgen = PFS.generation lpfs;
+                 m_ggen = Type_env.generation gamma;
+                 m_kill = kill_new_lvars;
+                 m_matching = matching;
+                 m_save = save_spec_vars;
+                 m_value = cached;
+               });
 
       (SESubst.copy subst, simpl_existentials)
   | None ->
@@ -992,7 +1060,7 @@ let simplify_pfs_and_gamma
       in
 
       (* Step 6 - Conclude *)
-      (result, !existentials)
+      (result, !existentials))
 
 let simplify_implication
     ~matching

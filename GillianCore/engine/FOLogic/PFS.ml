@@ -15,15 +15,34 @@ module H = Hashtbl.Make (struct
   let hash = Hashtbl.hash
 end)
 
-type t = { lst : Expr.t Ext_list.t; mutable idx : int H.t option }
+(* SERVPIPS (E19): [gen] is a stamp, fresh (globally unique) at creation and
+   at every mutation, and kept by [copy]: two formula sets with the same stamp
+   have the same formulae in the same order (see [generation]). *)
+let stamp_counter = ref 0
+
+let fresh_stamp () =
+  incr stamp_counter;
+  !stamp_counter
+
+type t = {
+  lst : Expr.t Ext_list.t;
+  mutable idx : int H.t option;
+  mutable gen : int;
+}
 
 let to_yojson (pfs : t) = Ext_list.to_yojson Expr.to_yojson pfs.lst
 
 let of_yojson j =
-  Result.map (fun lst -> { lst; idx = None }) (Ext_list.of_yojson Expr.of_yojson j)
+  Result.map
+    (fun lst -> { lst; idx = None; gen = fresh_stamp () })
+    (Ext_list.of_yojson Expr.of_yojson j)
 
-let mk lst = { lst; idx = None }
-let invalidate (pfs : t) = pfs.idx <- None
+let mk lst = { lst; idx = None; gen = fresh_stamp () }
+let generation (pfs : t) = pfs.gen
+
+let invalidate (pfs : t) =
+  pfs.idx <- None;
+  pfs.gen <- fresh_stamp ()
 let init () : t = mk (Ext_list.make ())
 
 let equal (pfs1 : t) (pfs2 : t) : bool =
@@ -55,6 +74,7 @@ let mem (pfs : t) (f : Expr.t) =
 let extend (pfs : t) (a : Expr.t) : unit =
   if not (mem pfs a) then (
     Ext_list.add a pfs.lst;
+    pfs.gen <- fresh_stamp ();
     match pfs.idx with
     | Some h -> H.replace h a (1 + Option.value (H.find_opt h a) ~default:0)
     | None -> ())
@@ -66,7 +86,7 @@ let clear (pfs : t) : unit =
 let length (pfs : t) = Ext_list.length pfs.lst
 
 let copy (pfs : t) : t =
-  { lst = Ext_list.copy pfs.lst; idx = Option.map H.copy pfs.idx }
+  { lst = Ext_list.copy pfs.lst; idx = Option.map H.copy pfs.idx; gen = pfs.gen }
 
 let merge_into_left (pfs_l : t) (pfs_r : t) : unit =
   Ext_list.concat pfs_l.lst pfs_r.lst;

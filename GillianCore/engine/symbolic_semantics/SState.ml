@@ -398,7 +398,8 @@ module Make (SMemory : SMemory.S) :
            -----------------------------------"
           pp state);
     let subst, _ =
-      Simplifications.simplify_pfs_and_gamma ~kill_new_lvars pfs gamma ~matching
+      Simplifications.simplify_pfs_and_gamma ~servpips_memo:true ~kill_new_lvars
+        pfs gamma ~matching
         ~save_spec_vars
     in
     let subst =

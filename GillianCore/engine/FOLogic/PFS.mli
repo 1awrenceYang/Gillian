@@ -26,6 +26,12 @@ val mem : t -> Expr.t -> bool
 (** [extend pfs f] extends the pure formulae [pfs] with the formula [f] *)
 val extend : t -> Expr.t -> unit
 
+(** SERVPIPS (E19): a stamp, fresh (globally unique) when the formula set is
+    created and whenever it is modified in place, and kept by {!copy}: two
+    formula sets with the same stamp hold the same formulae in the same
+    order. *)
+val generation : t -> int
+
 (*
 (** [nth_get pfs n] returns the n-th pure formula of [pfs] *)
 val nth_get : t -> int -> Formula.t

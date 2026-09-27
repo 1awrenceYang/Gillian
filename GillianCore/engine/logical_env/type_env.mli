@@ -11,6 +11,12 @@ type constructors_tbl_t = (string, Constructor.t) Hashtbl.t [@@deriving yojson]
 type datatypes_tbl_t = (string, Datatype.t) Hashtbl.t [@@deriving yojson]
 
 val as_hashtbl : t -> (string, Type.t) Hashtbl.t
+
+(** SERVPIPS (E19): a stamp, fresh (globally unique) when the environment is
+    created and whenever it is modified in place, and kept by {!copy}: two
+    environments with the same stamp have the same bindings in the same
+    iteration order. *)
+val generation : t -> int
 val copy : t -> t
 val extend : t -> t -> unit
 val filter : t -> (string -> bool) -> t
