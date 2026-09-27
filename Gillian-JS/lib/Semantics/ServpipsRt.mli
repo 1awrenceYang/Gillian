@@ -90,7 +90,11 @@
       (section 4.5); names are checked against {!builtin_names}. Native GIL
       operations ([and or not = => typeof toNumber toString], and [ite] on
       booleans) are built directly; the others become [FuncApp] (their SMT
-      encoding is WP1's). [ite(c, a, b)] with non-Boolean branches (the
+      encoding is WP1's). The order facts [<] / [<=] / [is_int] (aliases
+      [FLessThan] / [FLessThanEqual] / [IsInt]) are the native GIL
+      [FLessThan] / [FLessThanEqual] / [IsInt] (IEEE on literals, no fork);
+      every argument must be a literal number or a value of known type Num
+      (otherwise [unsupported]). [ite(c, a, b)] with non-Boolean branches (the
       models' value-level conditional): a literal [c] selects a branch; two
       string / two finite-number branches give the builtins [ite.str] /
       [ite.num] (SMT [ite], no fork); other branch types fork on [c]; [c]

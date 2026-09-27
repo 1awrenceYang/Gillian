@@ -65,6 +65,14 @@ let builtin_names : (string * int option) list =
     ("typeof", Some 1);
     ("toNumber", Some 1);
     ("toString", Some 1);
+    (* order facts on numbers (round 3): native GIL FLessThan /
+       FLessThanEqual / IsInt, no JS comparison fork; aliases by GIL name *)
+    ("<", Some 2);
+    ("<=", Some 2);
+    ("is_int", Some 1);
+    ("FLessThan", Some 2);
+    ("FLessThanEqual", Some 2);
+    ("IsInt", Some 1);
   ]
 
 (* [path.join/<n>] *)
@@ -808,8 +816,36 @@ module Make (E : X.ENV) = struct
         | Some (Some a) ->
             if n <> a then fail_err "%s expects %d arguments, got %d" name a n);
         let es = List.map e_of fargs in
+        (* the order builtins take numbers: a literal number or a value of
+           known type Num (otherwise the GIL operation is not the JS one) *)
+        let num_args () =
+          List.iter
+            (fun v ->
+              let ok =
+                match V.to_literal v with
+                | Some (Num _) -> true
+                | Some _ -> false
+                | None -> (
+                    match guard (fun () -> S.get_type st v) with
+                    | Some NumberType -> true
+                    | _ -> false)
+              in
+              if not ok then
+                fail_uns "builtin %s: argument not known to be a number: %s"
+                  name (pp_v v))
+            fargs
+        in
         let native : Expr.t option =
           match (name, es) with
+          | ("<" | "FLessThan"), [ a; b ] ->
+              num_args ();
+              Some (BinOp (a, FLessThan, b))
+          | ("<=" | "FLessThanEqual"), [ a; b ] ->
+              num_args ();
+              Some (BinOp (a, FLessThanEqual, b))
+          | ("is_int" | "IsInt"), [ e ] ->
+              num_args ();
+              Some (UnOp (IsInt, e))
           | "and", e :: rest ->
               Some (List.fold_left (fun acc x -> Expr.BinOp (acc, And, x)) e rest)
           | "or", e :: rest ->
