@@ -790,12 +790,29 @@ let array_length_expr (info : info) (c : class_spec) : Expr.t =
   | Fixed n -> Expr.Lit (Num (float_of_int n))
   | Sym -> Expr.LVar (len_var info c)
 
+(** The metadata location of a lazy value: one for the whole run, shared by
+    its classes (a path materialises at most one class), so that it can be
+    handed out before the class is chosen (see [deferred_metadata]). *)
+let meta_alocs : (string, string) Hashtbl.t = Hashtbl.create 64
+
+let meta_owner : (string, string) Hashtbl.t = Hashtbl.create 64
+
+let meta_aloc (info : info) : string =
+  match Hashtbl.find_opt meta_alocs info.lvar with
+  | Some m -> m
+  | None ->
+      let m = ALoc.alloc () in
+      Hashtbl.replace meta_alocs info.lvar m;
+      Hashtbl.replace meta_owner m info.lvar;
+      m
+
 let mat_aloc (info : info) (i : int) : string * string =
   match Hashtbl.find_opt mat_alocs (info.lvar, i) with
   | Some p -> p
   | None ->
       let c = info.classes.(i) in
-      let al = ALoc.alloc () and alm = ALoc.alloc () in
+      let al = ALoc.alloc () in
+      let alm = meta_aloc info in
       Hashtbl.replace mat_alocs (info.lvar, i) (al, alm);
       Hashtbl.replace aloc_owner al (info.lvar, i);
       let len =
@@ -905,21 +922,65 @@ let materialize (ms : mstate) (info : info) : branch list =
           (heap, facts, ltypes, al))
         feasible
 
-(** If [loc] is an unresolved registered lazy value, its materialisation
-    branches. *)
-let materialize_loc (ms : mstate) (loc : Expr.t) : branch list option =
+(** The registry entry of [loc] if it is an unresolved registered lazy
+    value. *)
+let unresolved_lazy (ms : mstate) (loc : Expr.t) : info option =
   let unresolved () =
     FOSolver.resolve_loc_name ~pfs:ms.pfs ~gamma:ms.gamma loc = None
   in
   match loc with
   | Lit (Loc _) | ALoc _ -> None
   | LVar x when Hashtbl.mem infos x ->
-      if unresolved () then Some (materialize ms (Hashtbl.find infos x)) else None
+      if unresolved () then Some (Hashtbl.find infos x) else None
   | _ -> (
       (* e.g. an lvar equal to a registered one *)
       match reduce ms loc with
-      | LVar x when Hashtbl.mem infos x && unresolved () ->
-          Some (materialize ms (Hashtbl.find infos x))
+      | LVar x when Hashtbl.mem infos x && unresolved () -> Some (Hashtbl.find infos x)
+      | _ -> None)
+
+(** The lazy value whose metadata location [loc] is, when that value is not
+    materialised on this path (the location is not in the heap yet). *)
+let pending_meta (ms : mstate) (loc : Expr.t) : info option =
+  match loc with
+  | ALoc m when Hashtbl.mem meta_owner m && not (SHeap.has_loc ms.heap m) ->
+      find (Hashtbl.find meta_owner m)
+  | _ -> None
+
+(** If [loc] is an unresolved registered lazy value, its materialisation
+    branches; likewise for the metadata location of a lazy value not
+    materialised on this path (the branches then continue on that
+    metadata location, which each class's object uses). *)
+let materialize_loc (ms : mstate) (loc : Expr.t) : branch list option =
+  match unresolved_lazy ms loc with
+  | Some info -> Some (materialize ms info)
+  | None -> (
+      match pending_meta ms loc with
+      | Some info ->
+          let m = meta_aloc info in
+          Some (List.map (fun (h, f, t, _) -> (h, f, t, m)) (materialize ms info))
+      | None -> None)
+
+(** [GetMetadata] of an unresolved registered lazy value that may be an
+    object: its metadata location, without materialising the value (reading
+    a field of that location later materialises it, see [materialize_loc],
+    except [@call], see [pending_meta_get_cell]). This is what lets
+    [typeof x] and IsCallable(x) (JSIL [hasField(metadata(x), "@call")])
+    answer without forking over the classes of [x]. *)
+let deferred_metadata (ms : mstate) (loc : Expr.t) : Expr.t option =
+  match unresolved_lazy ms loc with
+  | Some info when may_be_object info -> Some (Expr.ALoc (meta_aloc info))
+  | _ -> None
+
+(** [GetCell] of [@call] on the metadata location of a lazy value not
+    materialised on this path: absent, for every class (the object of a
+    lazy class never has [@call]: input values are data, never callable), so
+    no materialisation is needed. [None] for any other access. *)
+let pending_meta_get_cell (ms : mstate) (loc : Expr.t) (prop : Expr.t) : ret option =
+  match pending_meta ms loc with
+  | None -> None
+  | Some _ -> (
+      match reduce ms prop with
+      | Lit (String "@call") -> Some [ (ms.heap, [ loc; prop; nono ], [], []) ]
       | _ -> None)
 
 (* ------------------------------------------------------------------------ *)
@@ -1612,6 +1673,7 @@ let a_define = "SpDefine"
 let a_absent = "SpAbsent"
 let a_serialize = "SpSerialize"
 let a_put_prepare = "SpPutPrepare"
+let a_materialize = "SpMaterialize"
 
 (* Value trees produced by SpSerialize, handed to the caller by id. *)
 let serialized : (int, J.t) Hashtbl.t = Hashtbl.create 16

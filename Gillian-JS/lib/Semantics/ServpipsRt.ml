@@ -973,13 +973,13 @@ module Make (E : X.ENV) = struct
   (* The object locations [o] stands for, one per branch: [o] itself when it
      is a location; otherwise (a LazyJSON value that is not materialised on
      this path, e.g. a lazy error object marked as a model object) the
-     GetMetadata memory action materialises it, one branch per class
-     (integration round 1). *)
+     SpMaterialize memory action materialises it, one branch per class
+     (integration round 1; GetMetadata no longer materialises, mem3). *)
   let object_branches what (st : st) (o : vt) : (st * vt) list =
     if is_loc o then [ (st, o) ]
     else
       let res =
-        try S.execute_action "GetMetadata" st [ o ] with
+        try S.execute_action "SpMaterialize" st [ o ] with
         | Servpips.Path_end _ as e -> raise e
         | _ -> []
       in

@@ -87,6 +87,14 @@
     has the shared constant. Any other write to a hidden key makes it a
     written key.
 
+    {b Metadata before materialisation.} The metadata location of a lazy
+    value is one location per value, shared by its classes. [GetMetadata]
+    of an unresolved lazy value that may be an object returns it without
+    materialising; reading [@call] there answers "absent" (no lazy class is
+    callable), so [typeof x] and IsCallable(x) do not fork over the classes;
+    any other action on that location materialises the value first (one
+    branch per class, continuing on the same location).
+
     {b Enumeration} ([GetAllProps]) of an open lazy JSON object, of a view,
     or of any object whose metadata has [@sp_open] set: [unsupported]. A
     lazy array whose length is concrete is enumerated exactly (its missing
@@ -141,6 +149,9 @@
       true}}] (keeping the domain invariant) and [SpMarkLazyKey]; not a
       program write (no dirtiness). For resolvers ([__sp.define]).
     - [SpAbsent(o, key)] -> [[]]: raw tombstone ([__sp.absent]).
+    - [SpMaterialize(v)] -> [[loc]]: the object location of [v], one branch
+      per class when [v] is an unresolved lazy value (what [GetMetadata]
+      did before metadata reads were deferred); [v] itself otherwise.
     - [SpPutPrepare(o, key)] -> [[]]: called (extern
       [servpips_put_prepare]) by the JSIL [put] before [[Put]]: on a lazy
       JSON object (not a view or array) without a cell for the concrete key
@@ -268,6 +279,16 @@ val get_cell_miss : mstate -> string -> Expr.t -> ret option
     and "Hidden members" above. *)
 val before_set_cell : mstate -> string -> Expr.t -> Expr.t -> unit
 
+(** [GetMetadata] of an unresolved registered lazy value that may be an
+    object: its metadata location (one per value, shared by its classes),
+    without materialising it. *)
+val deferred_metadata : mstate -> Expr.t -> Expr.t option
+
+(** [GetCell] of [@call] on the metadata location of a lazy value not
+    materialised on this path: absent, without materialising ([None] for
+    other accesses, which {!materialize_loc} handles). *)
+val pending_meta_get_cell : mstate -> Expr.t -> Expr.t -> ret option
+
 (** [GetAllProps] hook: [Some branches] (heap, names, new facts, new types)
     for lazy arrays of concrete length and closed-struct lazy objects (see
     "Enumeration" above), raises [Path_end] for open objects and views,
@@ -322,6 +343,7 @@ val a_define : string
 val a_absent : string
 val a_serialize : string
 val a_put_prepare : string
+val a_materialize : string
 val stash_serialized : Yojson.Safe.t -> int
 val take_serialized : int -> Yojson.Safe.t option
 

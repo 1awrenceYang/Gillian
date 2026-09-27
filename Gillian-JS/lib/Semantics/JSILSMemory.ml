@@ -433,8 +433,14 @@ module M = struct
       (gamma : Type_env.t)
       (loc : vt)
       (prop : vt) : action_ret =
-    with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
-        get_cell_core heap pfs gamma loc prop)
+    match
+      if SL.active () then SL.pending_meta_get_cell (sp_ms heap pfs gamma) loc prop
+      else None
+    with
+    | Some rets -> Ok rets
+    | None ->
+        with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+            get_cell_core heap pfs gamma loc prop)
 
   let remove_cell
       (heap : t)
@@ -473,7 +479,13 @@ module M = struct
 
   let rec get_metadata (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt)
       : action_ret =
-    with_lazy_loc heap pfs gamma loc get_metadata_core
+    (* SERVPIPS: the metadata location of an unmaterialised lazy value is
+       known without choosing its class (ServpipsLazy.deferred_metadata) *)
+    match
+      if SL.active () then SL.deferred_metadata (sp_ms heap pfs gamma) loc else None
+    with
+    | Some m -> Ok [ (heap, [ loc; m ], [], []) ]
+    | None -> with_lazy_loc heap pfs gamma loc get_metadata_core
 
   and get_metadata_core
       (heap : t)
@@ -823,6 +835,17 @@ module M = struct
           at_loc loc (fun heap pfs gamma l ->
               SL.define (sp_ms heap pfs gamma) ~loc:l ~key:k v;
               Ok [ (heap, [], [], []) ])
+      | _ -> bad ()
+    else if action = SL.a_materialize then
+      match args with
+      | [ loc ] ->
+          with_lazy_loc heap pfs gamma loc (fun heap pfs gamma loc ->
+              let loc =
+                match get_loc_name pfs gamma loc with
+                | Some l -> Expr.loc_from_loc_name l
+                | None -> loc
+              in
+              Ok [ (heap, [ loc ], [], []) ])
       | _ -> bad ()
     else if action = SL.a_put_prepare then
       match args with
