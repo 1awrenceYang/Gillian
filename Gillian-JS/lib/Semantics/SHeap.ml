@@ -51,6 +51,16 @@ let keep_hook : (string -> bool) ref = ref (fun _ -> false)
 let get_ord (heap : t) (loc : string) : int Expr.Map.t =
   Option.value ~default:Expr.Map.empty (Hashtbl.find_opt heap.ord loc)
 
+(** Record [keys] as created now, in this order (after every property of
+    [loc] created so far); SERVPIPS mode only. Used to fix the enumeration
+    order of an input object whose JSON text order is unknown. *)
+let set_creation_order (heap : t) (loc : string) (keys : Expr.t list) : unit =
+  if track_order () then
+    Hashtbl.replace heap.ord loc
+      (List.fold_left
+         (fun m k -> Expr.Map.add k (next_seq ()) m)
+         (get_ord heap loc) keys)
+
 (** Bring the order map of [loc] in line with its full field-value list:
     forget absent or [none] fields, number new present fields (in map order;
     only reached by bulk updates, which never add present fields in

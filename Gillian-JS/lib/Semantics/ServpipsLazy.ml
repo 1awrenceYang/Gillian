@@ -1084,14 +1084,132 @@ let before_set_cell (ms : mstate) (al : string) (prop : Expr.t) (value : Expr.t)
 (* Enumeration (GetAllProps hook)                                           *)
 (* ------------------------------------------------------------------------ *)
 
+(** Largest number of non-index members of an input object whose
+    enumeration order is explored (by forking over every order): the JSON
+    text order of an input object is not known. *)
+let max_enum_order_keys = 3
+
+let enumerated_key = "@sp_enumerated"
+
+let rec permutations = function
+  | [] -> [ [] ]
+  | l ->
+      List.concat_map
+        (fun x -> List.map (fun p -> x :: p) (permutations (List.filter (( <> ) x) l)))
+        l
+
+(** Enumeration of a materialised lazy JSON object of a closed struct
+    (class without resolver, [closed] shape): exact. Every member of the
+    struct gets its cell (the member is created if needed); a member whose
+    existence is undetermined forks on "value = undefined" (absent: its
+    cell becomes a tombstone); then, as the JSON text order of the input is
+    unknown, one branch per order of the present non-index members (index
+    members come first in ascending order, E15), which is recorded as the
+    creation order of the object and marked [@sp_enumerated] so that later
+    enumerations on the path see the same order (and program writes are
+    then placed after it). More than [max_enum_order_keys] non-index
+    members that may be present, or a program write before the first
+    enumeration: [unsupported]. *)
+let closed_struct_enumeration (ms : mstate) (info : info) (i : int) (loc : string)
+    : (SHeap.t * Expr.t list * Expr.t list * (string * Type.t) list) list =
+  let c = info.classes.(i) in
+  let names heap =
+    match SHeap.ordered_fields heap loc with
+    | Ok names -> names
+    | Error _ -> unsupported "enumeration of an object with a symbolic key"
+  in
+  if meta_cell ms.heap loc enumerated_key <> None then [ (ms.heap, names ms.heap, [], []) ]
+  else (
+    if not (is_pristine_obj ms.heap loc) then
+      unsupported "enumeration of a written input object";
+    let props =
+      match field "props" c.members with
+      | Some (`Assoc l) -> List.filter (fun k -> class_member c k <> None) (List.map fst l)
+      | _ -> []
+    in
+    (* a branch: heap, facts, types; the first one works on ms.heap *)
+    let exists_step branches k =
+      List.concat_map
+        (fun (heap, facts, types) ->
+          let heap, facts, types, v =
+            match cell heap loc (str k) with
+            | Some (Lit Nono) -> (heap, facts, types, None)
+            | Some (EList [ Lit (String "d"); v; _; _; _ ])
+              when List.mem k (string_set heap loc lazykeys_key) ->
+                (heap, facts, types, Some v)
+            | Some _ -> (heap, facts, types, Some (Expr.Lit (Bool true)))
+            | None ->
+                let child = get_child ~parent_aloc:loc info k in
+                let ms' = { ms with heap; gamma = gamma_with ms types } in
+                let f, t, _ = child_facts ms' info i k child in
+                store_member heap loc k child;
+                (heap, facts @ f, types @ t, Some (Expr.LVar child.lvar))
+          in
+          match v with
+          | None -> [ (heap, facts, types) ]
+          | Some v ->
+              let gamma = gamma_with ms types in
+              let is_undef = eq v undef in
+              let can_undef = sat ms ~gamma (is_undef :: facts) in
+              let can_def = sat ms ~gamma (not_ is_undef :: facts) in
+              (* never drop the configuration (see member_access) *)
+              let can_def = can_def || not can_undef in
+              let absent h =
+                SHeap.set_fv_pair h loc (str k) nono;
+                set_remove h loc lazykeys_key k
+              in
+              if can_def && can_undef then (
+                let h' = SHeap.copy heap in
+                absent h';
+                [ (heap, facts @ [ not_ is_undef ], types); (h', facts @ [ is_undef ], types) ])
+              else if can_def then [ (heap, facts, types) ]
+              else (
+                absent heap;
+                [ (heap, facts, types) ]))
+        branches
+    in
+    let branches = List.fold_left exists_step [ (ms.heap, [], []) ] props in
+    let named heap =
+      List.filter
+        (fun k ->
+          (not (SHeap.is_array_index k))
+          &&
+          match cell heap loc (str k) with
+          | Some (Lit Nono) | None -> false
+          | Some _ -> true)
+        props
+    in
+    if List.exists (fun (h, _, _) -> List.length (named h) > max_enum_order_keys) branches
+    then
+      unsupported
+        (Printf.sprintf
+           "enumeration of input object %s: more than %d members, order unknown"
+           info.name max_enum_order_keys);
+    List.concat_map
+      (fun (heap, facts, types) ->
+        let perms = permutations (named heap) in
+        let n = List.length perms in
+        List.mapi
+          (fun j perm ->
+            let h = if j < n - 1 then SHeap.copy heap else heap in
+            SHeap.set_creation_order h loc (List.map str perm);
+            set_meta_cell h loc enumerated_key true_;
+            (h, names h, facts, types))
+          perms)
+      branches)
+
 let get_all_props (ms : mstate) (loc : string) :
-    (Expr.t list * Expr.t list * (string * Type.t) list) option =
+    (SHeap.t * Expr.t list * Expr.t list * (string * Type.t) list) list option =
   match owner_of_aloc loc with
   | None ->
       (match meta_cell ms.heap loc "@sp_open" with
       | Some (Lit (Bool false)) | None -> ()
       | Some _ -> unsupported "enumeration of an open object");
       None
+  | Some (x, i) when
+      (let c = (Hashtbl.find infos x).classes.(i) in
+       c.cls = Obj_cls && c.resolver = None && is_closed c.members) ->
+      Some (closed_struct_enumeration ms (Hashtbl.find infos x) i loc)
   | Some (x, i) -> (
       let info = Hashtbl.find infos x in
       let c = info.classes.(i) in
@@ -1120,7 +1238,7 @@ let get_all_props (ms : mstate) (loc : string) :
           store_member ms.heap loc k child)
       done;
       match SHeap.ordered_fields ms.heap loc with
-      | Ok names -> Some (names, !facts, !types)
+      | Ok names -> Some [ (ms.heap, names, !facts, !types) ]
       | Error _ -> unsupported "enumeration of an object with a symbolic key")
 
 (* ------------------------------------------------------------------------ *)

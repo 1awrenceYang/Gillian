@@ -1404,14 +1404,12 @@ let enum_check_h : X.handler =
             else if set md then
               path_end "unsupported" "enumeration of a model object"
             else
-              match lz with
-              | None -> [ X.Return (st, undef) ]
-              | Some _ -> (
-                  let st, cls = flag st "@class" in
-                  match Option.bind cls E.Val.to_literal with
-                  | Some (String "Array") -> [ X.Return (st, undef) ]
-                  | _ ->
-                      path_end "unsupported" "enumeration of an open object"))
+              (* a materialised LazyJSON value (@sp_lazy): the LazyJSON
+                 memory's GetAllProps decides (exact for arrays of concrete
+                 length and closed structs, unsupported for open objects
+                 and views; WP2, ServpipsLazy.get_all_props) *)
+              let _ = lz in
+              [ X.Return (st, undef) ])
         | _ -> [ X.Return (st, undef) ]);
   }
 

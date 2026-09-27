@@ -587,8 +587,12 @@ module M = struct
         if SL.active () then SL.get_all_props (sp_ms heap pfs gamma) loc_name
         else None
       with
-      | Some (names, facts, types) ->
-          Ok [ (heap, [ loc; EList names ], facts, types) ]
+      | Some branches ->
+          Ok
+            (List.map
+               (fun (heap, names, facts, types) ->
+                 (heap, [ loc; Expr.EList names ], facts, types))
+               branches)
       | None -> (
       match SHeap.get heap loc_name with
       | None ->
