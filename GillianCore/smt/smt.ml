@@ -997,6 +997,95 @@ let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
       eq p1.expr p2.expr >- BooleanType
 
 (* ------------------------------------------------------------------ *)
+(* SERVPIPS: facts about the terms of a query, asserted at its top level  *)
+(* ------------------------------------------------------------------ *)
+(* True properties of every JS value that a term of the query stands for,
+   collected while the query is encoded and asserted as top-level
+   conjuncts (not as guards of the sub-formula that mentions the term: a
+   fact holds in every model, including under a negation or in a
+   disjunct):
+   - every string has at most [max_string_length] code units (V8's
+     String::kMaxLength on 64-bit platforms, Node 16/18/20: 2^29 - 24;
+     a longer string cannot exist -- its creation throws a RangeError, which
+     Gillian does not model either);
+   - Number::toString of a finite number (the js.num2str uninterpreted
+     function) has 1 to 25 characters (ES2023 6.1.6.1.20: at most 17
+     digits, "0." and 5 zeros, a sign; or 17 digits, ".", "e", a sign and
+     3 exponent digits, and a sign).
+   A fact whose term mentions a variable bound by an enclosing quantifier
+   is not collected (it only loses information). *)
+module Servpips_facts = struct
+  let max_string_length = 536870888
+  let acc : sexp list ref option ref = ref None
+  let bound : SS.t list ref = ref []
+
+  let rec atoms (x : sexp) acc =
+    match x with
+    | Sexplib.Sexp.Atom a -> SS.add a acc
+    | List l -> List.fold_left (fun acc x -> atoms x acc) acc l
+
+  let add (f : sexp) =
+    match !acc with
+    | None -> ()
+    | Some l ->
+        let mentions_bound () =
+          match !bound with
+          | [] -> false
+          | bs ->
+              let a = atoms f SS.empty in
+              List.exists (fun b -> not (SS.disjoint a b)) bs
+        in
+        if (not (List.mem f !l)) && not (mentions_bound ()) then l := f :: !l
+
+  (* [len] is a (str.len s) term *)
+  let str_len_bound (len : sexp) =
+    add (num_leq len (int_k max_string_length))
+
+  let num2str_length (t : sexp) =
+    let len = app_ "str.len" [ t ] in
+    add (num_leq (int_k 1) len);
+    add (num_leq len (int_k 25))
+
+  (* run [f] with [vars] bound (quantified variables, raw and as SMT atoms) *)
+  let with_bound (vars : string list) f =
+    match !acc with
+    | None -> f ()
+    | Some _ ->
+        let b =
+          List.fold_left
+            (fun s v -> SS.add v (SS.add (sanitize_identifier v) s))
+            SS.empty vars
+        in
+        bound := b :: !bound;
+        Fun.protect
+          ~finally:(fun () ->
+            match !bound with
+            | _ :: rest -> bound := rest
+            | [] -> ())
+          f
+
+  (* run [f] without collecting facts (bodies of definitions, whose terms
+     mention the parameters of the defined function) *)
+  let without f =
+    let saved = !acc in
+    acc := None;
+    Fun.protect ~finally:(fun () -> acc := saved) f
+
+  (* run [f] collecting facts; returns its result and the facts *)
+  let collect f =
+    let saved_acc = !acc and saved_bound = !bound in
+    let l = ref [] in
+    acc := Some l;
+    bound := [];
+    Fun.protect
+      ~finally:(fun () ->
+        acc := saved_acc;
+        bound := saved_bound)
+      (fun () ->
+        let r = f () in
+        (r, List.rev !l))
+end
+
 (* SERVPIPS encodings (E5, E6): builtin functions and numeric operators *)
 (* ------------------------------------------------------------------ *)
 module Servpips_enc = struct
@@ -1076,12 +1165,14 @@ module Servpips_enc = struct
 
   let num_to_str r =
     ignore (uf "js.num2str" [ r ]);
+    Servpips_facts.num2str_length (app_ "js.num2str" [ r ]);
     num_to_str_body r
 
   (* ToNumberOp (finite branch of ToNumber): exact for short digit strings
      and whitespace-only strings, js.tonumber.num otherwise *)
   (* s is 1..15 decimal digits / only white space (or empty) *)
   let digits_c s =
+    Servpips_facts.str_len_bound (app_ "str.len" [ s ]);
     bool_and
       (app_ "str.in_re" [ s; Lazy.force digits_plus ])
       (num_lt (app_ "str.len" [ s ]) (int_k 16))
@@ -1199,7 +1290,8 @@ module Servpips_enc = struct
 
   let defined_defs : (string, definition) Hashtbl.t Lazy.t =
     lazy
-      (let t = Hashtbl.create 4 in
+      (Servpips_facts.without @@ fun () ->
+       let t = Hashtbl.create 4 in
        let ext = t_gil_ext_literal in
        let tostring =
          let other = app_ "js.tostring.other" [ x_ ] in
@@ -1311,6 +1403,10 @@ module Servpips_enc = struct
     let>-- args = List.map2 native_or_any spec.args args in
     let xs = List.map (fun (a : Encoding.t) -> a.expr) args in
     match (spec.smt, xs) with
+    | `Uf, [ _ ] when name = "js.num2str" ->
+        let t = uf name xs in
+        Servpips_facts.num2str_length t;
+        t >- spec.ret
     | `Uf, _ -> uf name xs >- spec.ret
     | `Defined, _ -> defined name xs >- spec.ret
     | `Native "str.indexof", [ s; p; i ] ->
@@ -1342,6 +1438,10 @@ let servpips_guarded (enc : Encoding.t) : Encoding.t =
   | g :: gs ->
       let guard = List.fold_left bool_and g gs in
       { b with expr = bool_and guard b.expr; extra_asrts = [] }
+
+(* the kind of the encoding of a numeric comparison (see encode_binop) *)
+let cmp_kind (upstream : Type.t) : Type.t =
+  if !servpips_mode then BooleanType else upstream
 
 let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
     =
@@ -1386,14 +1486,18 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
       num_mod p1.expr p2.expr >- IntType
+  (* SERVPIPS: a comparison is a Boolean. Upstream labels it Int / Num,
+     which is harmless for a top-level conjunct but makes an equality with a
+     Boolean fail to encode ("incompatible equality") and a quantifier over
+     it "not boolean"; the label is only corrected in SERVPIPS mode *)
   | ILessThan ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_lt p1.expr p2.expr >- IntType
+      num_lt p1.expr p2.expr >- cmp_kind IntType
   | ILessThanEqual ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_leq p1.expr p2.expr >- IntType
+      num_leq p1.expr p2.expr >- cmp_kind IntType
   | FPlus ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
@@ -1415,11 +1519,11 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | FLessThan ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      num_lt p1.expr p2.expr >- NumberType
+      num_lt p1.expr p2.expr >- cmp_kind NumberType
   | FLessThanEqual ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      num_leq p1.expr p2.expr >- NumberType
+      num_leq p1.expr p2.expr >- cmp_kind NumberType
   | Equal -> encode_equality p1 p2
   | Or ->
       let>- p1 = get_bool p1 in
@@ -1528,7 +1632,9 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       enc >- IntType
   | StrLen ->
       let>- le = get_string le in
-      atom "to_real" <| (atom "str.len" <| le.expr) >- NumberType
+      let len = atom "str.len" <| le.expr in
+      if !servpips_mode then Servpips_facts.str_len_bound len;
+      atom "to_real" <| len >- NumberType
   | ToStringOp when !servpips_mode ->
       let>- le = get_num le in
       Servpips_enc.num_to_str le.expr >- StringType
@@ -1654,7 +1760,10 @@ let encode_bound_expr
     (expr : 'a) =
   let open Encoding in
   let gamma = copy_extend_gamma gamma bound_vars in
-  let encoded = encode_expr ~gamma ~llen_lvars ~list_elem_vars expr in
+  let encoded =
+    Servpips_facts.with_bound (List.map fst bound_vars) (fun () ->
+        encode_expr ~gamma ~llen_lvars ~list_elem_vars expr)
+  in
 
   (* Extra asrts could contain these bound variables - separate these *)
   let rec atoms (sexp : sexp) =
@@ -1710,7 +1819,10 @@ let encode_quantified_expr
   in
   let gamma = copy_extend_gamma gamma quantified_vars in
   let encoded_assertion, consts, extra_asrts =
-    match encode_expr ~gamma ~llen_lvars ~list_elem_vars assertion with
+    match
+      Servpips_facts.with_bound (List.map fst quantified_vars) (fun () ->
+          encode_expr ~gamma ~llen_lvars ~list_elem_vars assertion)
+    with
     | { kind = Native BooleanType; expr; consts; extra_asrts } ->
         (expr, consts, extra_asrts)
     | _ -> exceptf "the thing inside forall is not boolean!"
@@ -1952,9 +2064,13 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
   let open Encoding in
   let llen_lvars = lvars_only_in_llen fs in
   let list_elem_vars = lvars_as_list_elements fs in
-  let encoded =
+  let encode () =
     Expr.Set.elements fs
     |> List.map (encode_assertion_top_level ~gamma ~llen_lvars ~list_elem_vars)
+  in
+  (* SERVPIPS: the facts about the terms of the query (Servpips_facts) *)
+  let encoded, facts =
+    if !servpips_mode then Servpips_facts.collect encode else (encode (), [])
   in
   let consts =
     Hashtbl.fold
@@ -1964,7 +2080,7 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
   let asrts =
     let extra_asrts = List.concat_map (fun e -> e.extra_asrts) encoded in
     let encoded_asrts = List.map (fun e -> e.expr) encoded in
-    List.map assume (extra_asrts @ encoded_asrts)
+    List.map assume (extra_asrts @ facts @ encoded_asrts)
   in
   consts @ asrts
 
