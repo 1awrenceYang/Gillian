@@ -55,6 +55,8 @@ let builtin_names : (string * int option) list =
     ("js.tostring", Some 1);
     ("js.toboolean", Some 1);
     ("js.looseeq", Some 2);
+    (* round 3: Array.isArray of any value *)
+    ("js.isarray", Some 1);
     (* native GIL operations *)
     ("and", None);
     ("or", None);
@@ -65,6 +67,14 @@ let builtin_names : (string * int option) list =
     ("typeof", Some 1);
     ("toNumber", Some 1);
     ("toString", Some 1);
+    (* order facts on numbers (round 3): native GIL FLessThan /
+       FLessThanEqual / IsInt, no JS comparison fork; aliases by GIL name *)
+    ("<", Some 2);
+    ("<=", Some 2);
+    ("is_int", Some 1);
+    ("FLessThan", Some 2);
+    ("FLessThanEqual", Some 2);
+    ("IsInt", Some 1);
   ]
 
 (* [path.join/<n>] *)
@@ -124,7 +134,6 @@ let json_opt_string = function
   | Some s -> `String s
 
 (* Numbers used by the arithmetic rules *)
-let two52 = 4503599627370496.
 let two53 = 9007199254740992.
 let two26 = 67108864.
 
@@ -823,6 +832,19 @@ module Make (E : X.ENV) = struct
   (* servpips_fn("<name>", a1, ...)                                      *)
   (* ------------------------------------------------------------------ *)
 
+  (* [@class] of the location [o] from its metadata, when both are single,
+     literal answers of the memory: [Some (st, class = "Array")] *)
+  let isarray_of_heap (st : st) (o : vt) : (st * bool) option =
+    match get_metadata st o with
+    | None -> None
+    | Some (st, m) -> (
+        match get_cell st m "@class" with
+        | Some (st, Some c) -> (
+            match V.to_literal c with
+            | Some (String cls) -> Some (st, cls = "Array")
+            | _ -> None)
+        | _ -> None)
+
   let rec fn (st : st) (args : vt list) : outcome list =
     match args with
     | [] -> fail_err "missing builtin name"
@@ -835,8 +857,36 @@ module Make (E : X.ENV) = struct
         | Some (Some a) ->
             if n <> a then fail_err "%s expects %d arguments, got %d" name a n);
         let es = List.map e_of fargs in
+        (* the order builtins take numbers: a literal number or a value of
+           known type Num (otherwise the GIL operation is not the JS one) *)
+        let num_args () =
+          List.iter
+            (fun v ->
+              let ok =
+                match V.to_literal v with
+                | Some (Num _) -> true
+                | Some _ -> false
+                | None -> (
+                    match guard (fun () -> S.get_type st v) with
+                    | Some NumberType -> true
+                    | _ -> false)
+              in
+              if not ok then
+                fail_uns "builtin %s: argument not known to be a number: %s"
+                  name (pp_v v))
+            fargs
+        in
         let native : Expr.t option =
           match (name, es) with
+          | ("<" | "FLessThan"), [ a; b ] ->
+              num_args ();
+              Some (BinOp (a, FLessThan, b))
+          | ("<=" | "FLessThanEqual"), [ a; b ] ->
+              num_args ();
+              Some (BinOp (a, FLessThanEqual, b))
+          | ("is_int" | "IsInt"), [ e ] ->
+              num_args ();
+              Some (UnOp (IsInt, e))
           | "and", e :: rest ->
               Some (List.fold_left (fun acc x -> Expr.BinOp (acc, And, x)) e rest)
           | "or", e :: rest ->
@@ -859,9 +909,19 @@ module Make (E : X.ENV) = struct
           | Some { smt = `Defined; _ } -> true
           | _ -> false
         in
+        (* js.isarray of a location: its class, when the heap gives a
+           literal one *)
+        let heap_isarray =
+          match (name, fargs) with
+          | "js.isarray", [ o ] when is_loc o -> isarray_of_heap st o
+          | _ -> None
+        in
         match (native, name, fargs) with
         | Some e, _, _ -> [ X.Return (st, guard (fun () -> S.eval_expr st e)) ]
         | None, "ite", [ c; a; b ] -> ite st c a b
+        | None, "js.isarray", _ when heap_isarray <> None ->
+            let st, b = Option.get heap_isarray in
+            [ X.Return (st, vbool b) ]
         | None, _, _ when defined ->
             (* evaluated on literal arguments (both modes); the conversion
                of a value of known type is simplified *)
@@ -1064,17 +1124,28 @@ module Make (E : X.ENV) = struct
     in
     [ X.Return (st, vbool b) ]
 
+  (* E10 (coordinator decision E10-strict): [servpips_rejected(reason,
+     thrw)]. A rejection with Throw = true (strict code, or a built-in whose
+     [[Put]]/[[Delete]] throws) has one exact meaning, the TypeError the
+     runtime throws next: the extern returns. With Throw = false (sloppy
+     code), or a Throw that is not the literal true, the path ends
+     unsupported(reason). *)
   let rejected (st : st) (args : vt list) : outcome list =
     if active () then
-      let reason =
+      let reason, thrw =
         match args with
-        | r :: _ -> (
-            match V.to_literal r with
-            | Some (String s) -> s
-            | _ -> pp_v r)
-        | [] -> "rejected"
+        | r :: rest -> (
+            ( (match V.to_literal r with
+              | Some (String s) -> s
+              | _ -> pp_v r),
+              match rest with
+              | t :: _ -> V.to_literal t
+              | [] -> None ))
+        | [] -> ("rejected", None)
       in
-      path_end "unsupported" reason
+      match thrw with
+      | Some (Bool true) -> [ X.Return (st, undef) ]
+      | _ -> path_end "unsupported" reason
     else [ X.Return (st, undef) ]
 
   (* ------------------------------------------------------------------ *)
@@ -1261,11 +1332,11 @@ module Make (E : X.ENV) = struct
                   BinOp (e, FLessThan, num bound);
                 ]
               in
-              (* an integer literal operand c (|c| <= 2^53) allows the
-                 other integer operand up to 2^53 - |c| (+, -) or
-                 2^53 / |c| ( * ): the exact result is an integer of
-                 magnitude <= 2^53, hence a double (the converter's
-                 guards for inexact arithmetic are the same) *)
+              (* ( * ) an integer literal operand c (|c| <= 2^53) allows
+                 the other integer operand up to 2^53 / |c|: the exact
+                 result is an integer of magnitude <= 2^53, hence a double
+                 (the converter's guards for inexact arithmetic are the
+                 same) *)
               let int_lit = function
                 | Some f when Float.is_integer f && Float.abs f <= two53 ->
                     Some (Float.abs f)
@@ -1278,14 +1349,12 @@ module Make (E : X.ENV) = struct
                   BinOp (e, FLessThanEqual, num bound);
                 ]
               in
-              let with_literal ~add =
+              let with_literal () =
                 match (int_lit la, int_lit lb) with
                 | Some c, _ | _, Some c ->
                     let other = if int_lit la <> None then eb else ea in
                     let bound =
-                      if add then two53 -. c
-                      else if c = 0. then two53
-                      else Float.floor (two53 /. c)
+                      if c = 0. then two53 else Float.floor (two53 /. c)
                     in
                     entails st (int_le bound other)
                 | None, None -> false
@@ -1293,11 +1362,21 @@ module Make (E : X.ENV) = struct
               let exact_ok =
                 match op with
                 | "+" | "-" ->
-                    entails st (int_in two52 ea @ int_in two52 eb)
-                    || with_literal ~add:true
+                    (* round 3: integer operands whose exact sum /
+                       difference has magnitude <= 2^53 (an integer double:
+                       IEEE addition is correctly rounded, so the result is
+                       exact); subsumes |a|, |b| < 2^52 and the literal
+                       rule *)
+                    entails st
+                      [
+                        Expr.UnOp (IsInt, ea);
+                        UnOp (IsInt, eb);
+                        BinOp (num (-.two53), FLessThanEqual, exact);
+                        BinOp (exact, FLessThanEqual, num two53);
+                      ]
                 | "*" ->
                     entails st (int_in two26 ea @ int_in two26 eb)
-                    || with_literal ~add:false
+                    || with_literal ()
                 | "%" -> entails st [ UnOp (IsInt, ea); UnOp (IsInt, eb) ]
                 | "/" -> (
                     match lb with

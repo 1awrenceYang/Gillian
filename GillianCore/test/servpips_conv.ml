@@ -358,8 +358,73 @@ let test_ite_and_lengths () =
     (sat [ eq (lv "#x") (num 12.); Expr.BinOp (UnOp (StrLen, UnOp (ToStringOp, lv "#x")), Equal, num 3.) ]
     = `Unsat)
 
+(* ------------------------------------------------------------------ *)
+(* Round 3: js.isarray, specialised js.tostring encodings                *)
+(* ------------------------------------------------------------------ *)
+
+let test_round3 () =
+  with_env @@ fun () ->
+  let x = lv "#x" in
+  let ty e t = Expr.BinOp (UnOp (TypeOf, e), Equal, Lit (Type t)) in
+  let or_ a b = Expr.BinOp (a, Or, b) in
+  let chk name expected fs =
+    let r = sat fs in
+    Alcotest.(check bool) name true (r = expected)
+  in
+  (* js.isarray: in the table, Boolean, false on every non-object literal *)
+  (match SF.lookup "js.isarray" with
+  | Some { args = [ None ]; ret = Type.BooleanType; smt = `Defined } -> ()
+  | _ -> Alcotest.fail "js.isarray is not a defined Any -> Bool builtin");
+  Alcotest.(check bool) "is_bool js.isarray" true (SF.is_bool "js.isarray");
+  List.iter
+    (fun l ->
+      Alcotest.(check bool) ("isarray " ^ pp_lit l) true
+        (SF.eval_concrete "js.isarray" [ l ] = Some (Literal.Bool false)))
+    Literal.[ String "a"; Num 1.; Num Float.nan; Bool true; Null; Undefined ];
+  Alcotest.(check bool) "isarray of a location: not evaluated" true
+    (SF.eval_concrete "js.isarray" [ Literal.Loc "$l_a" ] = None);
+  let o = Expr.ALoc "#o1" in
+  chk "SMT isarray(string) unsat" `Unsat [ eq x (str "a"); app "js.isarray" [ x ] ];
+  chk "SMT isarray(object) sat" `Sat [ eq x o; app "js.isarray" [ x ] ];
+  chk "SMT not isarray(object) sat" `Sat [ eq x o; not_ (app "js.isarray" [ x ]) ];
+  chk "SMT isarray of a Str | Undefined value unsat" `Unsat
+    [ or_ (ty x StringType) (eq x (Lit Undefined)); app "js.isarray" [ x ] ];
+  let gamma = Type_env.init () in
+  Type_env.update gamma "#s" Type.StringType;
+  Alcotest.(check bool) "reduction: isarray of a Str is false" true
+    (Expr.equal (Reduction.reduce_lexpr ~gamma (app "js.isarray" [ lv "#s" ])) Expr.false_);
+  (* js.tostring of a variable the query restricts to non-number types
+     (js.tostring.nonum): the same answers as the full definition *)
+  let m = or_ (ty x StringType) (eq x (Lit Undefined)) in
+  let ts = app "js.tostring" [ x ] in
+  chk "mask: a string gives itself" `Sat [ m; eq ts (str "12") ];
+  chk "mask: the string \"undefined\"" `Sat [ m; eq ts (str "undefined"); not_ (eq x (Lit Undefined)) ];
+  chk "mask: undefined gives \"undefined\"" `Unsat [ m; eq x (Lit Undefined); not_ (eq ts (str "undefined")) ];
+  chk "mask: exact on strings" `Unsat [ m; eq ts (str "abc"); eq x (str "abd") ];
+  chk "mask: no number" `Unsat [ m; eq x (num 12.) ];
+  (* a mask that allows numbers keeps the numeric branch *)
+  chk "mask with Num: the number 7" `Sat
+    [ or_ (ty x NumberType) (eq x (Lit Undefined)); eq ts (str "7"); ty x NumberType ];
+  chk "mask with Num: exact on 7" `Unsat
+    [ or_ (ty x NumberType) (eq x (Lit Undefined)); eq x (num 7.); not_ (eq ts (str "7")) ];
+  (* a known native type: the conversion of that type *)
+  let g = Hashtbl.create 2 in
+  Hashtbl.replace g "#s" Type.StringType;
+  Hashtbl.replace g "#n" Type.NumberType;
+  let sat_g fs =
+    match Smt.check_sat (Expr.Set.of_list fs) g with
+    | Some mm -> if Smt.is_unknown_model mm then `Unknown else `Sat
+    | None -> `Unsat
+  in
+  let s = lv "#s" in
+  Alcotest.(check bool) "native Str: identity" true
+    (sat_g [ eq s (str "q"); not_ (eq (app "js.tostring" [ s ]) (str "q")) ] = `Unsat);
+  Alcotest.(check bool) "native Num: integer text" true
+    (sat_g [ eq (lv "#n") (num 42.); not_ (eq (app "js.tostring" [ lv "#n" ]) (str "42")) ] = `Unsat)
+
 let tests : unit Alcotest.test_case list =
   [
+    ("round 3: js.isarray, specialised js.tostring encodings", `Quick, test_round3);
     ("defined builtins in the table", `Quick, test_table);
     ("concrete conversions vs Node", `Quick, test_eval_vs_node);
     ("SMT definitions vs Node", `Quick, test_smt_vs_node);

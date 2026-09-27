@@ -1381,9 +1381,42 @@ module Servpips_enc = struct
                   other);
            ]
        in
+       (* round 3: js.tostring without the numeric branch, for an argument
+          the query restricts to non-number types (see [nonum_lvars]); the
+          same body except that a number gives the unspecified
+          js.tostring.other: equal to js.tostring in every model of such a
+          query *)
+       let tostring_nonum =
+         let other = app_ "js.tostring.other" [ x_ ] in
+         make_definition
+           ~depends_on:[ def_gil_ext_literal; other_def "js.tostring" 1 t_string ]
+           [
+             define_fun "js.tostring.nonum" [ ("x", ext) ] t_string
+               (ite (is_str x_) (str_v x_)
+                  (ite (is_bool x_)
+                     (ite (bool_v x_) (string_k "true") (string_k "false"))
+                     (ite (is_null x_) (string_k "null")
+                        (ite (is_undef x_) (string_k "undefined") other))));
+           ]
+       in
+       (* round 3: js.isarray(v): false for every value that is not an object
+          (location); for an object, the uninterpreted js.isarray.other (the
+          engine does not know the class of a location in the solver; the
+          extern decides it from the @class metadata when it can) *)
+       let isarray =
+         let other = app_ "js.isarray.other" [ x_ ] in
+         make_definition
+           ~depends_on:[ def_gil_ext_literal; other_def "js.isarray" 1 t_bool ]
+           [
+             define_fun "js.isarray" [ ("x", ext) ] t_bool
+               (ite (is_loc x_) other (bool_k false));
+           ]
+       in
        Hashtbl.replace t "js.tostring" tostring;
+       Hashtbl.replace t "js.tostring.nonum" tostring_nonum;
        Hashtbl.replace t "js.toboolean" toboolean;
        Hashtbl.replace t "js.looseeq" looseeq;
+       Hashtbl.replace t "js.isarray" isarray;
        t)
 
   let defined name xs =
@@ -1393,6 +1426,65 @@ module Servpips_enc = struct
         app_ name xs
     | None -> exceptf "SERVPIPS: builtin %s has no definition" name
 
+  (* round 3: the logical variables that the query being encoded restricts
+     to types other than Num: a top-level conjunct (an element of the query
+     or a conjunct of one) that is a disjunction of atoms [typeOf x == T] /
+     [x == <literal>], all about the same [x], none of type Num. js.tostring
+     of such a variable is encoded as js.tostring.nonum (no numeric branch):
+     the conjunct holds in every model of the query, so the two agree there.
+     Set only while a query is encoded ([with_query]). *)
+  let nonum_lvars : SS.t ref = ref SS.empty
+
+  let nonum_of_conjunct (c : Expr.t) : string option =
+    let rec disjuncts (e : Expr.t) =
+      match e with
+      | BinOp (a, Or, b) -> disjuncts a @ disjuncts b
+      | e -> [ e ]
+    in
+    let atom (e : Expr.t) : (string * Type.t) option =
+      match e with
+      | BinOp (UnOp (TypeOf, LVar x), Equal, Lit (Type t))
+      | BinOp (Lit (Type t), Equal, UnOp (TypeOf, LVar x)) -> Some (x, t)
+      | BinOp (LVar x, Equal, Lit l) | BinOp (Lit l, Equal, LVar x) -> (
+          match l with
+          | Type _ | LList _ | Constant _ -> None
+          | l -> Some (x, Literal.type_of l))
+      | _ -> None
+    in
+    let atoms = List.map atom (disjuncts c) in
+    if List.exists Option.is_none atoms then None
+    else
+      match List.filter_map Fun.id atoms with
+      | (x, _) :: _ as l
+        when List.for_all (fun (y, t) -> y = x && t <> Type.NumberType) l ->
+          Some x
+      | _ -> None
+
+  let with_query (fs : Expr.Set.t) (f : unit -> 'a) : 'a =
+    let rec conjuncts (e : Expr.t) =
+      match e with
+      | BinOp (a, And, b) -> conjuncts a @ conjuncts b
+      | e -> [ e ]
+    in
+    let xs =
+      Expr.Set.fold
+        (fun e acc ->
+          List.fold_left
+            (fun acc c ->
+              match nonum_of_conjunct c with
+              | Some x -> SS.add x acc
+              | None -> acc)
+            acc (conjuncts e))
+        fs SS.empty
+    in
+    nonum_lvars := xs;
+    Fun.protect ~finally:(fun () -> nonum_lvars := SS.empty) f
+
+  let tostring_nonum (a : Encoding.t) : Encoding.t =
+    let open Encoding in
+    let>- a = extend_wrap a in
+    defined "js.tostring.nonum" [ a.expr ] >- StringType
+
   let builtin name (args : Encoding.t list) : Encoding.t =
     let open Encoding in
     let spec =
@@ -1400,35 +1492,50 @@ module Servpips_enc = struct
       | Some s -> s
       | None -> exceptf "SERVPIPS: unknown builtin %s" name
     in
-    if List.length args <> List.length spec.args then
-      exceptf "SERVPIPS builtin %s: %d arguments given, %d expected" name
-        (List.length args) (List.length spec.args);
-    let native_or_any t a =
-      match t with
-      | Some t -> get_native_of_type t a
-      | None -> extend_wrap a
+    let generic () =
+      if List.length args <> List.length spec.args then
+        exceptf "SERVPIPS builtin %s: %d arguments given, %d expected" name
+          (List.length args) (List.length spec.args);
+      let native_or_any t a =
+        match t with
+        | Some t -> get_native_of_type t a
+        | None -> extend_wrap a
+      in
+      let>-- args = List.map2 native_or_any spec.args args in
+      let xs = List.map (fun (a : Encoding.t) -> a.expr) args in
+      match (spec.smt, xs) with
+      | `Uf, [ _ ] when name = "js.num2str" ->
+          let t = uf name xs in
+          Servpips_facts.num2str_length t;
+          t >- spec.ret
+      | `Uf, _ -> uf name xs >- spec.ret
+      | `Defined, _ -> defined name xs >- spec.ret
+      | `Native "str.indexof", [ s; p; i ] ->
+          int_to_real (app_ "str.indexof" [ s; p; real_to_int i ])
+          >- NumberType
+      | `Native "str.substr", [ s; i; n ] ->
+          app_ "str.substr" [ s; real_to_int i; real_to_int n ] >- StringType
+      | `Native "str.from_int", [ i ] ->
+          app_ "str.from_int" [ real_to_int i ] >- StringType
+      | `Native "str.to_int", [ s ] ->
+          int_to_real (app_ "str.to_int" [ s ]) >- NumberType
+      | `Native "str.in_re.numlit", [ s ] ->
+          require_definition (Lazy.force numlit_def);
+          app_ "str.in_re" [ s; atom numlit_name ] >- BooleanType
+      | `Native f, xs -> app_ f xs >- spec.ret
     in
-    let>-- args = List.map2 native_or_any spec.args args in
-    let xs = List.map (fun (a : Encoding.t) -> a.expr) args in
-    match (spec.smt, xs) with
-    | `Uf, [ _ ] when name = "js.num2str" ->
-        let t = uf name xs in
-        Servpips_facts.num2str_length t;
-        t >- spec.ret
-    | `Uf, _ -> uf name xs >- spec.ret
-    | `Defined, _ -> defined name xs >- spec.ret
-    | `Native "str.indexof", [ s; p; i ] ->
-        int_to_real (app_ "str.indexof" [ s; p; real_to_int i ]) >- NumberType
-    | `Native "str.substr", [ s; i; n ] ->
-        app_ "str.substr" [ s; real_to_int i; real_to_int n ] >- StringType
-    | `Native "str.from_int", [ i ] ->
-        app_ "str.from_int" [ real_to_int i ] >- StringType
-    | `Native "str.to_int", [ s ] ->
-        int_to_real (app_ "str.to_int" [ s ]) >- NumberType
-    | `Native "str.in_re.numlit", [ s ] ->
-        require_definition (Lazy.force numlit_def);
-        app_ "str.in_re" [ s; atom numlit_name ] >- BooleanType
-    | `Native f, xs -> app_ f xs >- spec.ret
+    (* round 3: js.tostring of an argument of known native type is the
+       conversion of that type (no define-fun; no numeric branch for a
+       string) *)
+    match (name, args) with
+    | "js.tostring", [ ({ kind = Native StringType; _ } as a) ] -> a
+    | "js.tostring", [ ({ kind = Native NumberType; _ } as a) ] ->
+        let>- a = a in
+        num_to_str a.expr >- StringType
+    | "js.tostring", [ ({ kind = Native BooleanType; _ } as a) ] ->
+        let>- a = a in
+        ite a.expr (string_k "true") (string_k "false") >- StringType
+    | _ -> generic ()
 end
 
 (* SERVPIPS: the type guards of the wrapped values that a sub-formula accesses
@@ -1920,6 +2027,10 @@ let rec encode_logical_expression
   | ForAll (bt, e) ->
       encode_quantified_expr ~encode_expr:encode_logical_expression
         ~mk_quant:forall ~gamma ~llen_lvars ~list_elem_vars bt e
+  | FuncApp ("js.tostring", [ (LVar x as e) ])
+    when SS.mem x !Servpips_enc.nonum_lvars ->
+      (* SERVPIPS (round 3): the query restricts x to non-number types *)
+      Servpips_enc.tostring_nonum (f e)
   | FuncApp (name, les) when Servpips_functions.is_builtin name ->
       Servpips_enc.builtin name (List.map f les)
   | FuncApp (name, les) ->
@@ -2073,6 +2184,9 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
   let llen_lvars = lvars_only_in_llen fs in
   let list_elem_vars = lvars_as_list_elements fs in
   let encode () =
+    (* SERVPIPS (round 3): per-query facts for the js.tostring encoding *)
+    (if !servpips_mode then Servpips_enc.with_query fs else fun f -> f ())
+    @@ fun () ->
     Expr.Set.elements fs
     |> List.map (encode_assertion_top_level ~gamma ~llen_lvars ~list_elem_vars)
   in

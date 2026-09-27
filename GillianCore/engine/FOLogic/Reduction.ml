@@ -1100,6 +1100,10 @@ and reduce_lexpr_loop
               | Some ObjectType -> Expr.true_
               | Some StringType -> UnOp (Not, BinOp (e, Equal, Lit (String "")))
               | _ -> FuncApp (n, les))
+          | "js.isarray", [ e ] -> (
+              match type_of e with
+              | Some t when t <> ObjectType -> Expr.false_
+              | _ -> FuncApp (n, les))
           | ("ite.str" | "ite.num"), [ Lit (Bool c); a; b ] -> if c then a else b
           | ("ite.str" | "ite.num"), [ _; a; b ] when Expr.equal a b -> a
           | "js.looseeq", [ _; _ ]

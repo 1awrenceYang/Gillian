@@ -90,7 +90,15 @@
       (section 4.5); names are checked against {!builtin_names}. Native GIL
       operations ([and or not = => typeof toNumber toString], and [ite] on
       booleans) are built directly; the others become [FuncApp] (their SMT
-      encoding is WP1's). [ite(c, a, b)] with non-Boolean branches (the
+      encoding is WP1's). The order facts [<] / [<=] / [is_int] (aliases
+      [FLessThan] / [FLessThanEqual] / [IsInt]) are the native GIL
+      [FLessThan] / [FLessThanEqual] / [IsInt] (IEEE on literals, no fork);
+      every argument must be a literal number or a value of known type Num
+      (otherwise [unsupported]). [js.isarray(v)] (round 3, Array.isArray):
+      for a location whose [@class] the memory gives as a literal, that
+      answer ([true] iff ["Array"]); otherwise the defined builtin (false
+      for a non-object, the uninterpreted [js.isarray.other] for an
+      object). [ite(c, a, b)] with non-Boolean branches (the
       models' value-level conditional): a literal [c] selects a branch; two
       string / two finite-number branches give the builtins [ite.str] /
       [ite.num] (SMT [ite], no fork); other branch types fork on [c]; [c]
@@ -155,10 +163,13 @@
       concrete ToNumber; symbolic under [--servpips] -> the four branches of
       section 4.4 (NaN / +Infinity / -Infinity / [ToNumberOp s]) with their
       axioms; without [--servpips], [ToNumberOp s] (upstream behaviour).
-    - [servpips_rejected(reason)] (JSIL [put], [deleteProperty],
-      [i__putValue] rejection): ends the path [unsupported(reason)];
-      otherwise (inactive, see below) returns [undefined] and the runtime
-      continues as upstream.
+    - [servpips_rejected(reason, thrw)] (JSIL [put], [deleteProperty],
+      [i__putValue] rejection; [thrw] is the Throw flag, i.e. the strictness
+      of the code for the compiled [delete] / assignment, [true] for the
+      built-ins that throw): [thrw = true] returns [undefined] and the
+      runtime throws the TypeError (exact, as upstream); otherwise (sloppy
+      code) ends the path [unsupported(reason)]. Inactive (see below):
+      returns [undefined] and the runtime continues as upstream.
     - [servpips_enabled()] (JSIL runtime): [true] iff the SERVPIPS semantics
       is on ([--servpips], wpst or exec). [i__callTarget] (Internals.jsil)
       uses it to call bound functions from the runtime (Array higher-order

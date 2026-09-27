@@ -47,6 +47,9 @@
     js.tostring(v)           Any -> Str           defined (decision D-R2-2)
     js.toboolean(v)          Any -> Bool          defined (decision D-R2-2)
     js.looseeq(a,b)          Any,Any -> Bool      defined (decision D-R2-2)
+    js.isarray(v)            Any -> Bool          defined (round 3): false for a
+                                                  non-object, js.isarray.other(v)
+                                                  (UF) for an object location
     ite.str(c,a,b)           Bool,Str,Str -> Str  native (ite c a b)
     ite.num(c,a,b)           Bool,Num,Num -> Num  native (ite c a b)
     v}
@@ -87,6 +90,18 @@
       ([js.looseeq.other(a, b)]) when an object is compared with a boolean,
       number or string (ToPrimitive calls JS methods) or for GIL-internal
       values.
+    - [js.isarray(v)] (round 3): ES Array.isArray of a JS value: false for
+      every non-object; for an object (location) the uninterpreted
+      [js.isarray.other(v)] -- the solver does not see the class of a
+      location; [__servpips_fn("js.isarray", o)] decides it from the
+      [@class] metadata when the heap gives a literal class. The converter
+      translates it exactly ([(_ is js.arr) v]).
+    In SMT, [js.tostring(x)] of an argument of known native type is encoded
+    as the conversion of that type (no [define-fun]); [js.tostring(x)] of a
+    logical variable that the query restricts to non-number types (a
+    top-level conjunct [typeOf x == T1 \/ x == l \/ ...] with no number
+    alternative) uses [js.tostring.nonum] (the same body without the numeric
+    branch, equal to [js.tostring] in every model of the query).
     On literal arguments all three are evaluated ({!eval_concrete}, exact ES
     semantics including NaN/Infinity/-0); where the result is unspecified
     they are not evaluated.

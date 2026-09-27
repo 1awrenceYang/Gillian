@@ -73,7 +73,10 @@ let parse_and_compile_js path =
     let e_str = Javert_utils.Io_utils.load_js_file path in
     let e_str =
       if !Javert_utils.Js_config.cosette then
-        JS_PreParser.stringify_assume_and_assert e_str
+        (* SERVPIPS: the token-aware pre-parser under --servpips (R4) *)
+        if Gillian.General.Servpips.enabled () then
+          JS_PreParser.servpips_stringify_assume_and_assert e_str
+        else JS_PreParser.stringify_assume_and_assert e_str
       else e_str
     in
     let js_prog = JS_Parser.parse_string_exn ~program_path:path e_str in

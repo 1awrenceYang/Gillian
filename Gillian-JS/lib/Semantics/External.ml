@@ -52,8 +52,23 @@ struct
         | Some (Bool strictness) -> (
             let opt_lit_code = Val.to_literal v_code in
             match opt_lit_code with
-            | None ->
-                raise (Failure "Eval statement argument not a literal string")
+            | None -> (
+                (* SERVPIPS (test262 R7): a symbolic value whose type is known
+                   not to be String is returned unchanged (ES5 15.1.2.1 step
+                   1), e.g. an object in symbolic mode; a symbolic string or
+                   a value of unknown type still fails *)
+                let ty =
+                  if Servpips.enabled () then
+                    try State.get_type state v_code with _ -> None
+                  else None
+                in
+                match ty with
+                | Some t when t <> Gillian.Gil_syntax.Type.StringType ->
+                    let _ = update_store state x v_code in
+                    [ (state, cs, i, i + 1) ]
+                | _ ->
+                    raise
+                      (Failure "Eval statement argument not a literal string"))
             | Some (String code) -> (
                 let code =
                   Str.global_replace (Str.regexp (Str.quote "\\\"")) "\"" code
