@@ -1,0 +1,16 @@
+(* SERVPIPS-ARGS: -a *)
+(* SERVPIPS WP1 core probe (E13), a hand-written GIL program (run with
+   wpst -a): the guard of the second goto is not a boolean, so neither side
+   can be taken although the path condition is satisfiable. The configuration
+   vanishes; the audit reports note{vanished} and end{error, "vanished"},
+   stats.vanished = 1, and the sibling path returns. *)
+proc main() {
+          x := fresh_svar();
+          assume_type (x, Num);
+          goto [(x < 0.)] neg pos;
+  neg:    goto [(x + 1.)] done done;
+  pos:    ret := 1.;
+          goto done;
+  done:   ret := undefined;
+          return
+};

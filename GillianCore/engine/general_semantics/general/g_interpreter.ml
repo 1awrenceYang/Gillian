@@ -623,17 +623,30 @@ struct
           L.normal (fun m -> m "%s" msg);
           Res_list.error_with err
 
+    (* SERVPIPS (E13): a side of a logic branch/if dropped by the state (its
+       condition was found unsatisfiable) is reported as a prune event when the
+       condition mentions logical variables; [state] is unmodified. *)
+    let servpips_prune_lcmd (state : State.t) (cond : Expr.t) ~kept =
+      if Servpips.enabled () && not (SS.is_empty (Expr.lvars cond)) then
+        let pc, types = sp_pc state in
+        Servpips.record_prune ~guard:cond ~guard_orig:cond ~kept
+          ~by:!Servpips.last_decision ~pc ~types ()
+
     let eval_branch fof state =
       let state' = State.copy state in
       let left_states =
         match State.assume_a state [ fof ] with
         | Some state -> Res_list.return state
-        | None -> Res_list.vanish
+        | None ->
+            servpips_prune_lcmd state fof ~kept:"else";
+            Res_list.vanish
       in
       let right_states =
         match State.assume_a state' [ Expr.Infix.not fof ] with
         | Some state -> Res_list.return state
-        | None -> Res_list.vanish
+        | None ->
+            servpips_prune_lcmd state' fof ~kept:"then";
+            Res_list.vanish
       in
       left_states @ right_states
 
@@ -681,12 +694,16 @@ struct
           let then_states =
             match State.assume_a state [ e ] with
             | Some state -> eval_lcmds prog lcmds_t ~annot state
-            | None -> Res_list.vanish
+            | None ->
+                servpips_prune_lcmd state e ~kept:"else";
+                Res_list.vanish
           in
           let else_states =
             match State.assume_a state' [ ne ] with
             | Some state -> eval_lcmds prog lcmds_e ~annot state
-            | None -> Res_list.vanish
+            | None ->
+                servpips_prune_lcmd state' e ~kept:"then";
+                Res_list.vanish
           in
           then_states @ else_states
 

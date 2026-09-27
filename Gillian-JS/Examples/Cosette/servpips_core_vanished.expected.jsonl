@@ -1,0 +1,4 @@
+{"ev": "note", "code": "vanished", "msg": "no successor at main:3: goto [(x + 1.)] 6 6", "site": null, "data": null}
+{"ev": "end", "status": "error", "reason": "vanished", "outcome": null, "pc": [{"pp": "(#gen__0 < 0.)", "ast": ["BinOp", ["LVar", "#gen__0"], ["FLessThan"], ["Lit", ["Num", 0.0]]]}], "types": [[{"pp": "#gen__0", "ast": ["LVar", "#gen__0"]}, "Num"]]}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(0. <= #gen__0)", "ast": ["BinOp", ["Lit", ["Num", 0.0]], ["FLessThanEqual"], ["LVar", "#gen__0"]]}], "types": [[{"pp": "#gen__0", "ast": ["LVar", "#gen__0"]}, "Num"]]}
+{"ev": "stats", "leaves": 2, "ends": {"returned": 1, "threw": 0, "truncated": 0, "unknown": 0, "unsupported": 0, "error": 1}, "infeasible": 0, "vanished": 1, "max_branch": 0, "fatal": null, "solver": {"unknown_assumed_sat": 0, "entail_unknown": 0, "encode_failures": 0}}

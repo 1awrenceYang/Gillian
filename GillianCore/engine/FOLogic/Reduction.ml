@@ -2159,6 +2159,19 @@ and reduce_lexpr_loop
     (* BinOps: Maths *)
     | BinOp (Lit (Int z), ILessThanEqual, UnOp (LstLen, _))
       when Z.equal z Z.zero -> Expr.true_
+    (* SERVPIPS (E5): string lengths are non-negative integers *)
+    | BinOp (Lit (Num n), FLessThanEqual, UnOp (StrLen, _))
+      when !Config.servpips_semantics && n <= 0. -> Expr.true_
+    | BinOp (Lit (Num n), FLessThan, UnOp (StrLen, _))
+      when !Config.servpips_semantics && n < 0. -> Expr.true_
+    | BinOp (UnOp (StrLen, _), FLessThan, Lit (Num n))
+      when !Config.servpips_semantics && n <= 0. -> Expr.false_
+    | BinOp (UnOp (StrLen, _), FLessThanEqual, Lit (Num n))
+      when !Config.servpips_semantics && n < 0. -> Expr.false_
+    | BinOp (UnOp (StrLen, _), Equal, Lit (Num n))
+    | BinOp (Lit (Num n), Equal, UnOp (StrLen, _))
+      when !Config.servpips_semantics
+           && (n < 0. || not (Float.is_integer n)) -> Expr.false_
     (* x < y /\ (y <= x \/ y < x) <=> false *)
     | BinOp (e1, FLessThan, e2)
       when PFS.mem pfs (BinOp (e2, FLessThanEqual, e1))

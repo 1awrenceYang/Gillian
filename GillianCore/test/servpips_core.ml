@@ -287,6 +287,19 @@ let test_reduction () =
   Alcotest.(check bool) "numlit literal" true
     (Expr.equal (red (app "str.in_re.numlit" [ str " 0x1F " ])) (Expr.Lit (Bool true)))
 
+let test_slen_fact () =
+  with_env @@ fun () ->
+  Config.servpips_semantics := true;
+  let red e = Reduction.reduce_lexpr e in
+  let is b e = Expr.equal (red e) (Expr.Lit (Bool b)) in
+  let l = slen (lv "#s") in
+  Alcotest.(check bool) "0 <= s-len" true (is true (Expr.BinOp (num 0., FLessThanEqual, l)));
+  Alcotest.(check bool) "s-len < 0" true (is false (Expr.BinOp (l, FLessThan, num 0.)));
+  Alcotest.(check bool) "-1 < s-len" true (is true (Expr.BinOp (num (-1.), FLessThan, l)));
+  Alcotest.(check bool) "s-len = 1.5" true (is false (eq l (num 1.5)));
+  Alcotest.(check bool) "s-len = -1" true (is false (eq l (num (-1.))));
+  Alcotest.(check bool) "s-len = 2 kept" true (Expr.equal (red (eq l (num 2.))) (eq l (num 2.)))
+
 let test_typing () =
   with_env @@ fun () ->
   let gamma = Type_env.init () in
@@ -553,6 +566,7 @@ let tests : unit Alcotest.test_case list =
     ("smt non-finite literal", `Quick, test_encoding_failure);
     ("reduction of builtins", `Quick, test_reduction);
     ("typing of builtins", `Quick, test_typing);
+    ("s-len >= 0 fact", `Quick, test_slen_fact);
     ("E7 IEEE reductions", `Quick, test_ieee_reduction);
     ("E16 StringToNumber N2 samples", `Quick, test_n2);
     ("V1b StringToNumber + numlit vs Node", `Quick, test_string_to_number);
