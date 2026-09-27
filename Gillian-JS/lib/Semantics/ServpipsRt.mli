@@ -104,8 +104,19 @@
     - [servpips_arith(op, a, b, site)] (compiler): design section 4.4 rules
       1-5 (exact bounded integer arithmetic, division/modulo by a possibly
       zero divisor, non-finite literal operands, havoc
-      [arith(<op>)@<file:line:col>#k] with [decl]/[note{havoc}], overflow
-      branches [note{overflow-fork}]).
+      [arith(<op>)@<file:line:col>#k] with [decl]/[note{havoc}]). Exactness
+      (rule 2) also holds for [+]/[-] with an integer literal operand [c]
+      ([|c| <= 2^53]) and an integer other operand of magnitude at most
+      [2^53 - |c|], and for [*] with an integer literal [c] and an integer
+      other operand of magnitude at most [2^53 / |c|] (the result is an
+      integer of magnitude <= 2^53). Overflow (rule 5, decision D-R2-1):
+      when [|a op b| >= MAX] (the largest double) is satisfiable for a
+      havoc result, the overflow case is not explored: it is reported as
+      [note{arith-overflow}] and an [end{unsupported, "arith-overflow"}]
+      (path condition before the operation), and the path continues with
+      the (finite) havoc value only; there are no +/-Infinity branches.
+      Callers bound their numbers with sound range facts (lengths, dates,
+      DynamoDB numbers, ...) so that no overflow is satisfiable.
     - [servpips_tonumber(s)] (JSIL [i__toNumber] on strings): literal ->
       concrete ToNumber; symbolic under [--servpips] -> the four branches of
       section 4.4 (NaN / +Infinity / -Infinity / [ToNumberOp s]) with their

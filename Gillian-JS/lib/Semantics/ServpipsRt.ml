@@ -121,6 +121,7 @@ let json_opt_string = function
 
 (* Numbers used by the arithmetic rules *)
 let two52 = 4503599627370496.
+let two53 = 9007199254740992.
 let two26 = 67108864.
 
 (* Site label of a site string: [file:line:col] (drop the end position). *)
@@ -1169,10 +1170,43 @@ module Make (E : X.ENV) = struct
                   BinOp (e, FLessThan, num bound);
                 ]
               in
+              (* an integer literal operand c (|c| <= 2^53) allows the
+                 other integer operand up to 2^53 - |c| (+, -) or
+                 2^53 / |c| ( * ): the exact result is an integer of
+                 magnitude <= 2^53, hence a double (the converter's
+                 guards for inexact arithmetic are the same) *)
+              let int_lit = function
+                | Some f when Float.is_integer f && Float.abs f <= two53 ->
+                    Some (Float.abs f)
+                | _ -> None
+              in
+              let int_le bound e =
+                [
+                  Expr.UnOp (IsInt, e);
+                  BinOp (num (-.bound), FLessThanEqual, e);
+                  BinOp (e, FLessThanEqual, num bound);
+                ]
+              in
+              let with_literal ~add =
+                match (int_lit la, int_lit lb) with
+                | Some c, _ | _, Some c ->
+                    let other = if int_lit la <> None then eb else ea in
+                    let bound =
+                      if add then two53 -. c
+                      else if c = 0. then two53
+                      else Float.floor (two53 /. c)
+                    in
+                    entails st (int_le bound other)
+                | None, None -> false
+              in
               let exact_ok =
                 match op with
-                | "+" | "-" -> entails st (int_in two52 ea @ int_in two52 eb)
-                | "*" -> entails st (int_in two26 ea @ int_in two26 eb)
+                | "+" | "-" ->
+                    entails st (int_in two52 ea @ int_in two52 eb)
+                    || with_literal ~add:true
+                | "*" ->
+                    entails st (int_in two26 ea @ int_in two26 eb)
+                    || with_literal ~add:false
                 | "%" -> entails st [ UnOp (IsInt, ea); UnOp (IsInt, eb) ]
                 | "/" -> (
                     match lb with
@@ -1182,7 +1216,12 @@ module Make (E : X.ENV) = struct
               in
               if exact_ok then [ ret st exact ]
               else
-                (* rule 4: havoc, rule 5: overflow *)
+                (* rule 4: havoc; rule 5 (decision D-R2-1): when the
+                   result may overflow, the overflow case is not
+                   explored: it ends as [unsupported("arith-overflow")]
+                   (fail closed), and the path continues with the havoc
+                   value (a finite number) *)
+                let pc0 = pc_types st in
                 let label = site_label site in
                 let name = Printf.sprintf "arith(%s)@%s#" op label in
                 let st, k = next_count st name in
@@ -1191,19 +1230,18 @@ module Make (E : X.ENV) = struct
                 emit_decl ~lvar:x ~name ~sort:"Num" ~kind:"havoc"
                   ~site:(`String site) ~k:(`Int k) ();
                 Servpips.note ~code:"havoc" ~msg:name ~site ();
-                let overflow =
-                  if op = "%" then []
-                  else
-                    let maxv = num Float.max_float in
-                    let p = Expr.BinOp (maxv, FLessThanEqual, exact) in
-                    let n = Expr.BinOp (exact, FLessThanEqual, num (-.Float.max_float)) in
-                    let pb = if sat st [ p ] then [ X.Return (S.copy st, vnum Float.infinity) ] else [] in
-                    let nb = if sat st [ n ] then [ X.Return (S.copy st, vnum Float.neg_infinity) ] else [] in
-                    if pb <> [] || nb <> [] then
-                      Servpips.note ~code:"overflow-fork" ~msg:name ~site ();
-                    pb @ nb
-                in
-                X.Return (st, r) :: overflow)
+                (if op <> "%" then
+                   let maxv = num Float.max_float in
+                   let p = Expr.BinOp (maxv, FLessThanEqual, exact) in
+                   let n =
+                     Expr.BinOp (exact, FLessThanEqual, num (-.Float.max_float))
+                   in
+                   if sat st [ Expr.BinOp (p, Or, n) ] then (
+                     Servpips.note ~code:"arith-overflow" ~msg:name ~site ();
+                     let pc, types = pc0 in
+                     Servpips.record_end ~status:"unsupported"
+                       ~reason:"arith-overflow" ~pc ~types ()));
+                [ X.Return (st, r) ])
         in
         zero_branches @ nonzero_branches
 end
