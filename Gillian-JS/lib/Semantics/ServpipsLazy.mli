@@ -253,7 +253,7 @@ val take_serialized : int -> Yojson.Safe.t option
     For extern handlers (e.g. WP3's [__servpips_emit("call", ...)] uses
     {!Ext.serialize}, [__servpips_define] uses {!Ext.define}). All raise
     [Servpips.Path_end] ([unsupported]) under concrete execution, except
-    [is_lazy] / [lazy_name] which answer [false] / [None]. *)
+    [is_lazy] / [lazy_name] which answer [false] / [None] and [serialize]. *)
 module Ext : sig
   type ('st, 'vt) env =
     (module ServpipsExterns.ENV with type st = 'st and type vt = 'vt)
@@ -274,6 +274,9 @@ module Ext : sig
   val define : ('st, 'vt) env -> 'st -> 'vt -> 'vt -> 'vt -> 'st list
   val absent : ('st, 'vt) env -> 'st -> 'vt -> 'vt -> 'st list
 
-  (** Value tree (I1 VT) of a value. *)
+  (** Value tree (I1 VT) of a value. Symbolic execution: [SpSerialize]
+      (ServpipsValue). Concrete execution ([exec], no lazy values): the same
+      format built through GetMetadata/GetCell/GetAllProps, with the concrete
+      memory's property order (not E15). *)
   val serialize : ('st, 'vt) env -> 'st -> 'vt -> Yojson.Safe.t
 end

@@ -1402,8 +1402,167 @@ module Ext = struct
       st list =
     List.map fst (run env a_absent st [ o; k ])
 
+  (* Value tree through the standard JS memory actions only (GetMetadata,
+     GetCell, GetAllProps): used under concrete execution, where there are
+     no lazy values. Property order is the memory's GetAllProps order. *)
+  let serialize_concrete (type st vt) (env : (st, vt) env) (st : st) (v : vt) :
+      J.t =
+    let module E = (val env : ServpipsExterns.ENV with type st = st and type vt = vt) in
+    let opaque w = `Assoc [ ("t", `String "opaque"); ("what", `String w) ] in
+    let valn v =
+      `Assoc [ ("t", `String "val"); ("e", Servpips.expr_json (E.Val.to_expr v)) ]
+    in
+    let act a args =
+      match E.State.execute_action a st args with
+      | [ Ok (_, vs) ] -> Some vs
+      | _ -> None
+    in
+    let getcell o k =
+      match act "GetCell" [ o; E.Val.from_literal (String k) ] with
+      | Some [ _; _; x ] when E.Val.to_literal x <> Some Nono -> Some x
+      | _ -> None
+    in
+    let meta o k =
+      match act "GetMetadata" [ o ] with
+      | Some [ _; m ] -> (
+          match E.Val.to_literal m with
+          | Some (Loc _) -> getcell m k
+          | _ -> None)
+      | _ -> None
+    in
+    let lit_str x =
+      match Option.map E.Val.to_literal x with
+      | Some (Some (String s)) -> Some s
+      | _ -> None
+    in
+    let desc_value d =
+      match E.Val.to_list d with
+      | Some [ tag; value; _; en; _ ] -> (
+          match (E.Val.to_literal tag, E.Val.to_literal en) with
+          | Some (String "d"), Some (Bool true) -> `Data value
+          | Some (String "d"), Some (Bool false) -> `Skip
+          | Some (String "a"), Some (Bool true) -> `Accessor
+          | Some (String "a"), Some (Bool false) -> `Skip
+          | _ -> `Unknown)
+      | Some (tag :: _ :: _ :: en :: _) -> (
+          match (E.Val.to_literal tag, E.Val.to_literal en) with
+          | Some (String "a"), Some (Bool true) -> `Accessor
+          | Some (String "a"), Some (Bool false) -> `Skip
+          | _ -> `Unknown)
+      | _ -> `Unknown
+    in
+    let rec vt depth seen v =
+      if depth > 32 then opaque "depth"
+      else
+        match E.Val.to_literal v with
+        | Some (Loc l) ->
+            if List.mem l seen then opaque "cycle" else obj depth (l :: seen) l v
+        | _ -> valn v
+    and obj depth seen l v =
+      if meta v "@call" <> None then opaque "function"
+      else
+        match lit_str (meta v "@sp_kind") with
+        | Some "blob" ->
+            let field k =
+              match getcell v k with
+              | Some d -> (
+                  match desc_value d with
+                  | `Data x -> Some x
+                  | _ -> None)
+              | None -> None
+            in
+            let src =
+              match field "__sp$src" with
+              | Some x when E.Val.to_literal x <> Some Null
+                            && E.Val.to_literal x <> Some Undefined ->
+                  Servpips.expr_json (E.Val.to_expr x)
+              | _ -> `Null
+            in
+            let enc =
+              match Option.map E.Val.to_literal (field "__sp$enc") with
+              | Some (Some (String e))
+                when List.mem e
+                       [ "base64"; "utf8"; "latin1"; "hex"; "utf16le"; "ascii" ] ->
+                  `String e
+              | _ -> `Null
+            in
+            `Assoc [ ("t", `String "blob"); ("src", src); ("enc", enc) ]
+        | Some ("date" | "stream" | "set" as k) -> opaque k
+        | Some _ -> opaque "model:kind"
+        | None -> (
+            match meta v "@sp_model" with
+            | Some m when E.Val.to_literal m <> Some (Bool false) -> (
+                match E.Val.to_literal m with
+                | Some (String s) -> opaque ("model:" ^ s)
+                | _ -> opaque "model:object")
+            | _ -> (
+                match meta v "@sp_open" with
+                | Some m when E.Val.to_literal m <> Some (Bool false) ->
+                    opaque "model:open"
+                | _ ->
+                    if lit_str (meta v "@class") = Some "Array" then array depth seen l v
+                    else plain depth seen l v))
+    and array depth seen l v =
+      let data_value d =
+        match E.Val.to_list d with
+        | Some (tag :: value :: _) when E.Val.to_literal tag = Some (String "d") ->
+            Some value
+        | _ -> None
+      in
+      match Option.map E.Val.to_literal (Option.bind (getcell v "length") data_value) with
+      | Some (Some (Num f)) when Float.is_integer f && f >= 0. && f <= 100000. ->
+          let items =
+            List.init (int_of_float f) (fun i ->
+                match getcell v (string_of_int i) with
+                | Some d -> (
+                    match desc_value d with
+                    | `Data x -> vt (depth + 1) seen x
+                    | `Accessor -> opaque "accessor"
+                    | `Skip -> valn (E.Val.from_literal Undefined)
+                    | `Unknown -> opaque "model:unknown-descriptor")
+                | None -> valn (E.Val.from_literal Undefined))
+          in
+          `Assoc
+            [ ("t", `String "arr"); ("aloc", `String l); ("items", `List items); ("len", `Null) ]
+      | _ -> opaque "model:array-length"
+    and plain depth seen l v =
+      let names =
+        match act "GetAllProps" [ v ] with
+        | Some [ _; props ] -> (
+            match E.Val.to_list props with
+            | Some ps -> List.filter_map (fun p -> lit_str (Some p)) ps
+            | None -> [])
+        | _ -> []
+      in
+      let names =
+        List.filter
+          (fun k ->
+            String.length k > 0 && k.[0] <> '@'
+            && not (String.length k >= 5 && String.sub k 0 5 = "__sp$"))
+          names
+      in
+      let props =
+        List.filter_map
+          (fun k ->
+            match getcell v k with
+            | Some d -> (
+                match desc_value d with
+                | `Data x -> Some (`List [ `String k; vt (depth + 1) seen x ])
+                | `Accessor -> Some (`List [ `String k; opaque "accessor" ])
+                | `Skip -> None
+                | `Unknown -> Some (`List [ `String k; opaque "model:unknown-descriptor" ]))
+            | None -> None)
+          names
+      in
+      `Assoc
+        [ ("t", `String "obj"); ("aloc", `String l); ("props", `List props); ("sym", `List []) ]
+    in
+    vt 0 [] v
+
   let serialize (type st vt) (env : (st, vt) env) (st : st) (v : vt) : J.t =
     let module E = (val env : ServpipsExterns.ENV with type st = st and type vt = vt) in
+    if not E.symbolic then serialize_concrete env st v
+    else
     match run env a_serialize st [ v ] with
     | [ (_, [ id ]) ] -> (
         match E.Val.to_literal id with

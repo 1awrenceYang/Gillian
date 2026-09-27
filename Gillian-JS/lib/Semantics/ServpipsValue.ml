@@ -332,7 +332,19 @@ let x_debug_vt : ServpipsExterns.handler =
               ]
           else `Assoc [ ("vt", j) ]
         in
-        Servpips.note ~code:"vt" ~msg:tag ~data ();
+        if Servpips.enabled () then Servpips.note ~code:"vt" ~msg:tag ~data ()
+        else
+          (* e.g. gillian-js exec: no SERVPIPS log, print the note on stderr *)
+          prerr_endline
+            (Yojson.Safe.to_string
+               (`Assoc
+                 [
+                   ("ev", `String "note");
+                   ("code", `String "vt");
+                   ("msg", `String tag);
+                   ("site", `Null);
+                   ("data", data);
+                 ]));
         [ ServpipsExterns.Return (state, E.Val.from_literal Undefined) ]);
   }
 

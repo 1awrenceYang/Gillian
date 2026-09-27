@@ -38,5 +38,6 @@ val serialize_ms : ServpipsLazy.mstate -> Expr.t -> Yojson.Safe.t
 (** Extern [servpips_debug_vt(tag, v, withPc?)] (debug/test aid, not part of
     I2-SF): emits [{"ev":"note","code":"vt","msg":tag,"site":null,
     "data":{"vt":VT}}]; when [withPc] is [true], [data] also has ["pc"] and
-    ["types"] of the current state (as in [call] events). *)
+    ["types"] of the current state (as in [call] events). Without
+    [--servpips] (e.g. [gillian-js exec]) the note is printed on stderr. *)
 val x_debug_vt : ServpipsExterns.handler
