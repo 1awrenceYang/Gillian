@@ -2239,10 +2239,22 @@ and reduce_lexpr_loop
         let open Syntaxes.Option in
         (* If we're reducing A || B or A && B and either side have a reduction exception, it must be false *)
         let flel, fler, exn =
-          try (f lel, f ler, false) with
-          | ReductionException _ when op = Or || op = And ->
-              (Expr.false_, Expr.false_, true)
-          | exn -> raise exn
+          if op = Or && !Config.servpips_semantics then
+            (* SERVPIPS: a disjunct whose reduction fails (e.g. ToNumberOp of
+               undefined after a substitution) is false; the other disjunct
+               stays (upstream: the whole disjunction became false, dropping
+               the executions that satisfy the other disjunct) *)
+            let try_f e = try Some (f e) with ReductionException _ -> None in
+            match (try_f lel, try_f ler) with
+            | Some a, Some b -> (a, b, false)
+            | Some a, None -> (a, Expr.false_, false)
+            | None, Some b -> (Expr.false_, b, false)
+            | None, None -> (Expr.false_, Expr.false_, true)
+          else
+            try (f lel, f ler, false) with
+            | ReductionException _ when op = Or || op = And ->
+                (Expr.false_, Expr.false_, true)
+            | exn -> raise exn
         in
         let- () = if exn then Some Expr.false_ else None in
         let def = Expr.BinOp (flel, op, fler) in
@@ -2384,6 +2396,20 @@ and reduce_lexpr_loop
                 else if PFS.mem pfs flel then fler
                 else if PFS.mem pfs fler then flel
                 else BinOp (flel, And, fler))
+        (* SERVPIPS: a disjunct that is not typable under gamma (a sound
+           fact of the path) is false, e.g. u = ToNumberOp(n) once n is
+           known to be a number; upstream the whole disjunction was
+           untypable (exception: the configuration and its siblings ended
+           with an error) *)
+        | Or
+          when !Config.servpips_semantics
+               && not (snd (Typing.type_lexpr gamma def)) -> (
+            let ok e = snd (Typing.type_lexpr gamma e) in
+            match (ok flel, ok fler) with
+            | true, false -> flel
+            | false, true -> fler
+            | false, false -> Expr.false_
+            | true, true -> def)
         | Or when lexpr_is_bool gamma def -> (
             match (flel, fler) with
             (* 1 is the neutral *)
