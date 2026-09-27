@@ -15,9 +15,14 @@ let substitution_in_place ?(subst_all = false) (subst : SESubst.t) (x : t) :
             Some (LVar x)
         | _ -> Some le);
 
+    (* SERVPIPS (E19): the substitution (an endo visitor) returns the value
+       itself when it mentions no substituted variable; such a value is not
+       reduced again (it was reduced when it was computed) *)
+    let sp = !Config.servpips_semantics in
     filter_map_inplace x (fun _ value ->
         let substed = SESubst.subst_in_expr store_subst ~partial:true value in
-        Some (Reduction.reduce_lexpr substed)))
+        if sp && substed == value then Some value
+        else Some (Reduction.reduce_lexpr substed)))
 
 (** Returns the set containing all the vars occurring in --x-- *)
 let vars (x : t) : SS.t =
