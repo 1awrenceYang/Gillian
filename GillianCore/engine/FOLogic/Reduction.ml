@@ -375,6 +375,10 @@ let rec get_length_of_string (str : Expr.t) : int option =
   | BinOp (sl, StrCat, sr) ->
       Option.value ~default:None
         (Option.map (fun ll -> Option.map (( + ) ll) (f sr)) (f sl))
+  (* SERVPIPS: any other string expression (builtin applications such as
+     decodeURIComponent(..), num_to_string x, js.tostring(v), ...) has an
+     unknown length here (its SMT encoding is str.len of the term) *)
+  | _ when !Config.servpips_semantics -> None
   | _ ->
       Fmt.failwith "get_length_of_string: string equals %a, impossible" Expr.pp
         str
@@ -406,6 +410,7 @@ let rec get_nth_of_string (str : Expr.t) (idx : int) : Expr.t option =
         Option.bind (get_length_of_string ls) (fun llen ->
             let lst, idx = if idx < llen then (ls, idx) else (rs, idx - llen) in
             f lst idx)
+    | _ when !Config.servpips_semantics -> None
     | _ ->
         Fmt.failwith "get_nth_of_string: string equals %a, impossible" Expr.pp
           str
