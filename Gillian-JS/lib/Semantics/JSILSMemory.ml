@@ -250,6 +250,30 @@ module M = struct
         ~kept:"else" ~by:"solver" ~pc:(PFS.to_list pfs)
         ~types:(Type_env.to_list_expr gamma) ()
 
+  (* SERVPIPS (R5): [Some es'] when [dom] is an [ESet] whose elements are
+     strictly increasing in Expr.compare order (the form the reduction gives
+     a set of literals), with [es'] the elements plus [p] at its place
+     (unchanged if an element compares equal to [p]); [None] otherwise *)
+  let servpips_sorted_insert (dom : Expr.t) (p : Expr.t) : Expr.t list option =
+    match dom with
+    | ESet es ->
+        let rec sorted = function
+          | a :: (b :: _ as r) -> Expr.compare a b < 0 && sorted r
+          | _ -> true
+        in
+        if not (sorted es) then None
+        else
+          let rec ins acc = function
+            | [] -> List.rev (p :: acc)
+            | x :: r as l ->
+                let c = Expr.compare p x in
+                if c < 0 then List.rev_append acc (p :: l)
+                else if c = 0 then List.rev_append acc l
+                else ins (x :: acc) r
+          in
+          Some (ins [] es)
+    | _ -> None
+
   let get_cell_core
       (heap : t)
       (pfs : PFS.t)
@@ -356,13 +380,34 @@ module M = struct
                       NOp (SetUnion, [ dom; ESet [ prop ] ])
                     in
                     let new_domain =
-                      if literal_miss then Reduction.reduce_lexpr new_domain
+                      if literal_miss then
+                        (* SERVPIPS (R5): the reduction of this union is the
+                           sorted, duplicate-free list of the literals
+                           (Expr.Set order); when the domain already is such
+                           a list, inserting the name gives the same result
+                           in one pass instead of two sorts of the whole
+                           domain per miss (quadratic-times-log in the
+                           number of distinct names read on one object) *)
+                        match servpips_sorted_insert dom prop with
+                        | Some es -> Expr.ESet es
+                        | None -> Reduction.reduce_lexpr new_domain
                       else
                         Reduction.reduce_lexpr ?gamma:(Some gamma)
                           ?pfs:(Some pfs) new_domain
                     in
-                    let fv_list' = SFVL.add prop (Lit Nono) fv_list in
-                    SHeap.set heap loc_name fv_list' (Some new_domain) mtdt;
+                    (* SERVPIPS (R5): only the missing name changes: its
+                       tombstone and the domain are recorded directly (the
+                       same heap as SHeap.set with fv_list + {prop: none},
+                       without rebuilding the object's field tables and
+                       creation order, n log n per miss on an object with
+                       n names) *)
+                    if !Gillian.Utils.Config.servpips_semantics then (
+                      SHeap.set_fv_pair heap loc_name prop (Lit Nono);
+                      SHeap.set_dom heap loc_name (Some new_domain))
+                    else
+                      SHeap.set heap loc_name
+                        (SFVL.add prop (Lit Nono) fv_list)
+                        (Some new_domain) mtdt;
                     Ok [ (heap, [ loc; prop; Lit Nono ], [], []) ])
                   else
                     let f_names : Expr.t list = SFVL.field_names fv_list in
