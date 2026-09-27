@@ -212,6 +212,16 @@ let find_equalities (pfs : PFS.t) (le : Expr.t) : Expr.t list =
 let typable (gamma : Type_env.t) (le : Expr.t) (target_type : Type.t) : bool =
   let t, success = Typing.type_lexpr gamma le in
   if success then Option.fold ~some:(Type.equal target_type) ~none:true t
+  else if !Config.servpips_semantics then
+    (* SERVPIPS: an untypable term only guards a simplification (which is
+       then not applied), as a term of the wrong type does. It occurs inside
+       a disjunct that is false under gamma, e.g. (typeOf u = Num /\ u <= 10)
+       once u is known to be a List: the whole disjunct becomes false when
+       the disjunction is reduced (see the Or case of reduce_binop), whereas
+       the exception ended the configuration and its siblings with an error.
+       A formula of the path condition that stays untypable is dropped as
+       non-Boolean by the state (a branch decided by typing). *)
+    false
   else
     let msg : string =
       Fmt.str "TYPE ERROR: %a not typable in typing environment %a" Expr.pp le

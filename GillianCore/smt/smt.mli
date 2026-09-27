@@ -14,6 +14,15 @@ exception SMT_error of string
     re-raised as {!SMT_encoding_failure}. *)
 val servpips_mode : bool ref
 
+(** SERVPIPS: the facts asserted at the top level of every query about its
+    terms (see smt.ml, [Servpips_facts]): every [str.len] term is at most
+    [servpips_max_string_length] (V8's String::kMaxLength, 2^29 - 24), and
+    [str.len (js.num2str x)] is between the bounds of
+    [servpips_num2str_length] (1 and 25). *)
+val servpips_max_string_length : int
+
+val servpips_num2str_length : int * int
+
 (** Turn SERVPIPS mode on (idempotent): sets {!servpips_mode} and sends
     [(set-option :encoding bmp)] (strings are sequences of UTF-16 code
     units; also re-sent when the solver is restarted). In SERVPIPS mode the

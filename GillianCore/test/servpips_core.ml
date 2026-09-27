@@ -661,6 +661,118 @@ let test_no_model () =
   Alcotest.(check bool) "not the unknown pseudo-model" false
     (Smt.is_unknown_model Smt.sat_model)
 
+let test_smt_string_facts () =
+  (* SERVPIPS: every str.len term is at most V8's String::kMaxLength
+     (536870888), and js.num2str (Number::toString of a finite number) has 1
+     to 25 characters; the facts are top-level conjuncts, so they also hold
+     under a negation or in a disjunct *)
+  let chk name exp fs gamma = Alcotest.check res name exp (sat ~gamma fs) in
+  let lt a b = Expr.BinOp (a, FLessThan, b) in
+  let u op e = Expr.UnOp (op, e) in
+  (* a string of the maximal length exists (z3 may give up building it:
+     unknown, which counts as satisfiable) *)
+  Alcotest.(check bool) "s-len at the maximum: not unsat" true
+    (sat ~gamma:gs [ eq (slen (lv "#s")) (num 536870888.) ] <> `Unsat);
+  chk "s-len 50" `Sat [ eq (slen (lv "#s")) (num 50.) ] gs;
+  chk "s-len above the maximum" `Unsat [ lt (num 536870888.) (slen (lv "#s")) ] gs;
+  chk "s-len above the maximum, negated" `Unsat
+    [ u Not (Expr.BinOp (slen (lv "#s"), FLessThanEqual, num 536870888.)) ]
+    gs;
+  chk "s-len above the maximum, in a disjunct" `Unsat
+    [
+      Expr.BinOp
+        (lt (num 536870888.) (slen (lv "#s")), Or, eq (lv "#s") (str "abc"));
+      Expr.BinOp (lv "#s", Equal, str "abc") |> u Not;
+    ]
+    gs;
+  chk "concatenation above the maximum" `Unsat
+    [
+      lt (num 536870888.)
+        (slen (Expr.BinOp (lv "#s", StrCat, lv "#t")));
+    ]
+    [ ("#s", Type.StringType); ("#t", Type.StringType) ];
+  chk "js.num2str is not empty" `Unsat [ eq (app "js.num2str" [ lv "#x" ]) (str "") ] gx;
+  chk "js.num2str: 25 characters" `Sat [ eq (slen (app "js.num2str" [ lv "#x" ])) (num 25.) ] gx;
+  chk "js.num2str: not 26 characters" `Unsat
+    [ eq (slen (app "js.num2str" [ lv "#x" ])) (num 26.) ]
+    gx;
+  chk "ToStringOp of a non-integer is not empty" `Unsat
+    [ eq (u ToStringOp (lv "#x")) (str ""); eq (lv "#x") (num 0.5) ]
+    gx;
+  (* a str.len term under a quantifier that mentions the bound variable:
+     no fact (it would mention an unbound name), the query still works *)
+  chk "s-len of a quantified variable" `Sat
+    [
+      Expr.ForAll
+        ( [ ("#q", Some Type.StringType) ],
+          Expr.BinOp (num 0., FLessThanEqual, slen (lv "#q")) );
+    ]
+    [];
+  (* ... and the bound is not applied to it (weaker, not wrong): z3 has to
+     look for a longer string, and gives up (unknown) or finds one *)
+  Alcotest.(check bool) "s-len of a quantified variable: no bound" true
+    (sat
+       [
+         Expr.Exists
+           ( [ ("#q", Some Type.StringType) ],
+             Expr.BinOp (num 536870888., FLessThan, slen (lv "#q")) );
+       ]
+    <> `Unsat)
+
+let test_smt_comparison_kind () =
+  (* SERVPIPS: a numeric comparison is a Boolean (upstream labelled its
+     encoding Int / Num: an equality with a Boolean then wrapped it with the
+     wrong constructor, and a quantifier over it was "not boolean") *)
+  let chk name exp fs gamma = Alcotest.check res name exp (sat ~gamma fs) in
+  let lt a b = Expr.BinOp (a, FLessThan, b) in
+  let le a b = Expr.BinOp (a, FLessThanEqual, b) in
+  chk "(x < 3) == true" `Sat [ eq (lt (lv "#x") (num 3.)) (Lit (Bool true)) ] gx;
+  chk "(x < 3) == true, x = 5" `Unsat
+    [ eq (lt (lv "#x") (num 3.)) (Lit (Bool true)); eq (lv "#x") (num 5.) ]
+    gx;
+  chk "b == (x <= 3)" `Unsat
+    [ eq (lv "#b") (le (lv "#x") (num 3.)); lv "#b"; eq (lv "#x") (num 4.) ]
+    [ ("#b", Type.BooleanType); ("#x", Type.NumberType) ];
+  chk "(i < 3) == false (ints)" `Unsat
+    [
+      eq (Expr.BinOp (lv "#i", ILessThan, Lit (Int (Z.of_int 3)))) (Lit (Bool false));
+      eq (lv "#i") (Lit (Int Z.one));
+    ]
+    [ ("#i", Type.IntType) ];
+  chk "forall over a comparison" `Unsat
+    [ Expr.ForAll ([ ("#q", Some Type.NumberType) ], lt (lv "#q") (num 3.)) ]
+    []
+
+let test_sat_cache_types () =
+  (* SERVPIPS: the answer cache of Smt.check_sat is keyed by the formulas and
+     the types of their variables: the same formulas are unsatisfiable when
+     #cb is typed Bool and satisfiable when it is not typed *)
+  let fs =
+    [
+      Expr.UnOp (Not, eq (lv "#cb") (Lit (Bool true)));
+      Expr.UnOp (Not, eq (lv "#cb") (Lit (Bool false)));
+    ]
+  in
+  Alcotest.check res "typed Bool" `Unsat (sat ~gamma:[ ("#cb", Type.BooleanType) ] fs);
+  Alcotest.check res "untyped, same formulas" `Sat (sat fs);
+  Alcotest.check res "typed Bool again" `Unsat
+    (sat ~gamma:[ ("#cb", Type.BooleanType) ] fs)
+
+let test_tostring_typed () =
+  (* SERVPIPS: js.tostring of a typed argument is encoded by the branch of
+     its definition for that type *)
+  let chk name exp fs gamma = Alcotest.check res name exp (sat ~gamma fs) in
+  let ts e = app "js.tostring" [ e ] in
+  chk "string: itself" `Unsat [ Expr.UnOp (Not, eq (ts (lv "#s")) (lv "#s")) ] gs;
+  chk "number 12" `Sat [ eq (ts (lv "#x")) (str "12"); eq (lv "#x") (num 12.) ] gx;
+  chk "number 12, wrong" `Unsat [ eq (ts (lv "#x")) (str "13"); eq (lv "#x") (num 12.) ] gx;
+  chk "boolean false" `Unsat
+    [ eq (ts (lv "#b")) (str "true"); Expr.UnOp (Not, lv "#b") ]
+    [ ("#b", Type.BooleanType) ];
+  chk "untyped string value" `Unsat
+    [ eq (lv "#v") (str "a"); Expr.UnOp (Not, eq (ts (lv "#v")) (str "a")) ]
+    []
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -696,4 +808,8 @@ let tests : unit Alcotest.test_case list =
     ("E7 negate keeps NaN comparisons", `Quick, test_negate_nan);
     ("input never equals another location", `Quick, test_input_not_loc);
     ("SERVPIPS: sat answers read no model (backslash string)", `Quick, test_no_model);
+    ("SERVPIPS: str.len bound and js.num2str length facts", `Quick, test_smt_string_facts);
+    ("SERVPIPS: numeric comparisons encode as Booleans", `Quick, test_smt_comparison_kind);
+    ("SERVPIPS: the sat cache is keyed by the types", `Quick, test_sat_cache_types);
+    ("SERVPIPS: js.tostring of a typed argument", `Quick, test_tostring_typed);
   ]

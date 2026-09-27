@@ -97,7 +97,25 @@ val hello_builtins : (unit -> Yojson.Safe.t) ref
 
 (** Emit the [hello] event:
     [{"ev":"hello","v":2,"fork":..,"z3":..,"shard":..,"unroll":..,
-      "smt_timeout_ms":..,"builtins":..}] *)
+      "smt_timeout_ms":..,"builtins":..,"typing":"asserted",
+      "facts":{"str.len.max":536870888,"js.num2str.len":[1,25]}}].
+
+    [typing] is a capability: ["asserted"] means that the typing
+    environment reported in [types] (of [end], [call], [prune], [decl]) only
+    holds asserted types -- consequences of the path condition (typeOf
+    facts, typed equalities, after simplification) and of declared types --
+    and never a type Gillian inferred while evaluating a term (the SERVPIPS
+    typing mode since round 2: [Typing] does not commit inferred types, and
+    reverse type inference does not look under disjunctions, implications,
+    negations or [ite.*]). A converter may therefore state every reported
+    type as a fact. Absent in engines before round 3.
+
+    [facts] lists the facts every SMT query of the engine assumes about its
+    terms (asserted at the top level of the query): every string length is
+    at most [str.len.max] (V8's String::kMaxLength, 2^29 - 24), and the
+    length of Number::toString of a finite number (the js.num2str
+    function) is within [js.num2str.len]. A converter certifying prune
+    events should assume them too. Absent before round 3. *)
 val hello : unroll:int -> unit -> unit
 
 (** Emit an [end] event:
@@ -226,6 +244,42 @@ val record_prune :
   unit ->
   unit
 
+(** {2 Per-path step budget}
+
+    Every configuration counts the commands executed on its path since the
+    path's last branch (a step with several successors). A configuration
+    whose count reaches the budget ends as [end{truncated, "step budget"}]
+    and the other configurations are explored further: a loop that never
+    forks and never exits (e.g. the regenerator runtime's dispatch loop on
+    an infeasible aliasing path) cannot block the shard until its time
+    budget. The budget is [wpst --servpips-step-budget N], else the
+    environment variable [SERVPIPS_STEP_BUDGET] (a number of commands; [0]
+    turns it off), else {!default_step_budget}. *)
+
+val default_step_budget : int
+
+(** The effective budget ([0]: none). *)
+val step_budget : unit -> int
+
+(** Set the budget ([--servpips-step-budget]). *)
+val set_step_budget : int -> unit
+
+(** [over_step_budget n]: SERVPIPS mode is on and [n] commands without a
+    branch reach the budget. *)
+val over_step_budget : int -> bool
+
+(** Count one executed command (for [stats.steps.total]). *)
+val count_step : unit -> unit
+
+(** A branch-free segment has reached [n] commands (for
+    [stats.steps.max_segment]). *)
+val note_segment : int -> unit
+
+(** [end{truncated, "step budget"}] for a configuration over the budget
+    (counted in [stats.steps.budget_ends]). *)
+val record_step_budget :
+  pc:Expr.t list -> types:(Expr.t * Type.t) list -> unit -> unit
+
 (** A solver query answered [unknown] was treated as satisfiable (sat query)
     or as not entailed (entailment query): emit
     [note{unknown-assumed-sat}] or [note{entail-unknown}] and count it (E3). *)
@@ -245,8 +299,65 @@ val fatal : unit -> string option
     [{"ev":"stats","leaves":..,"ends":{..},"infeasible":..,"vanished":..,
       "prunes":..,"max_branch":..,"solver":{"queries":..,
       "unknown_assumed_sat":..,"entail_unknown":..,"encode_failures":..},
-      "fatal":null|"..","seconds":..,"rss_mb":..}] *)
+      "fatal":null|"..","seconds":..,"rss_mb":..,
+      "steps":{"total":..,"max_segment":..,"budget":..,"budget_ends":..}}]
+    ([steps]: commands executed, the longest branch-free segment of a path,
+    the step budget and the number of paths it ended). *)
 val emit_stats : unit -> unit
+
+(** {2 Branch-sharing assertion (diagnostics only)}
+
+    With the environment variable [SERVPIPS_BRANCH_CHECK] set (to anything
+    but [""] or ["0"]) in SERVPIPS mode, the interpreter checks after every
+    step that produced several configurations that no two of them share a
+    mutable part (store, call-stack stores, heap tables, path condition,
+    typing environment; see [State.servpips_mutables]), and that within each
+    one the current store and the stores of its call stack are distinct. A
+    violation is reported by {!report_sharing}. Checking costs time; the
+    results are otherwise unchanged. *)
+
+(** Is the branch-sharing assertion on? *)
+val branch_check : unit -> bool
+
+(** The named mutable parts of a symbolic heap (installed by the memory
+    model, e.g. Gillian-JS's [JSILSMemory] for its [SHeap]); default: the
+    heap value itself. *)
+val heap_mutables : (Obj.t -> (string * Obj.t) list) ref
+
+(** A sharing violation at [where]: [note{branch-sharing}] (once per
+    distinct message), a line on stderr, and [stats.fatal] (first one), so
+    that the run exits with the internal-error code. *)
+val report_sharing : where:string -> string -> unit
+
+(** Number of violations found so far (including repeated ones). *)
+val sharing_count : int ref
+
+(** {2 Typing check (diagnostics only)}
+
+    With the environment variable [SERVPIPS_TYPING_CHECK] set (to anything
+    but [""] or ["0"]) in SERVPIPS mode, every time the pure part of a state
+    is read for an event ([State.servpips_pc]: end, call, prune, note
+    events), each entry [x : T] of its typing environment that was not
+    declared ({!declare_type}: an assumed type, e.g. of a typed fresh
+    variable or of a LazyJSON variable with a single-type mask, or a type
+    returned by a memory action) is checked to be entailed by the path
+    condition (the path condition and [not (typeOf x = T)] must be
+    unsatisfiable without [x]'s type); a failure is reported by
+    {!report_unasserted}. This is the check of the ["typing": "asserted"]
+    capability of the hello event. It costs one solver query per type. *)
+
+val typing_check : unit -> bool
+
+(** Record that [x : t] is declared (assumed), not derived. *)
+val declare_type : string -> Type.t -> unit
+
+val is_declared_type : string -> Type.t -> bool
+
+(** An unasserted type: [note{typing-unasserted}] (once per distinct
+    message), a line on stderr, and [stats.fatal] (first one). *)
+val report_unasserted : string -> unit
+
+val unasserted_count : int ref
 
 (** {2 Sampling profiler (diagnostics only)}
 

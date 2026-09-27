@@ -57,15 +57,18 @@ let simplification_cache_find key =
    path (keys, answers and the formulae they retain): ~4.5 MB per path of the
    m2 probe, so a long shard (L=2, >1500 paths) reached the 8 GB container
    limit. In SERVPIPS mode it is emptied when it reaches
-   SERVPIPS_SIMPL_CACHE entries (default 20000), together with the memos that
+   SERVPIPS_SIMPL_CACHE entries (default 5000; 20000 in round 2: the smaller
+   bound costs no time on the dataset and keeps long shards much smaller,
+   e.g. 810 MB instead of 1330 MB after 420 s of an L=2 shard), together with
+   the memos that
    refer to its entries. A later miss recomputes the simplification: the
    answer is equivalent (the cache is a memo), though not always identical in
    form (upstream, a hit returns the answer before the ALoc-transitivity step
    of the miss path). Runs below the bound are unaffected. *)
 let servpips_cache_max =
   match Sys.getenv_opt "SERVPIPS_SIMPL_CACHE" with
-  | Some s -> ( match int_of_string_opt s with Some n when n > 0 -> n | _ -> 20000)
-  | None -> 20000
+  | Some s -> ( match int_of_string_opt s with Some n when n > 0 -> n | _ -> 5000)
+  | None -> 5000
 
 let servpips_cache_resets : (unit -> unit) list ref = ref []
 

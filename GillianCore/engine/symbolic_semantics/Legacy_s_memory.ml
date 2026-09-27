@@ -117,6 +117,10 @@ module Modernize (Old_memory : S) = struct
         let+ new_heap, v, new_fofs, new_types = oks in
         let new_pfs = PFS.copy pc.pfs in
         let new_gamma = Type_env.copy pc.gamma in
+        (* SERVPIPS (typing check): types returned by a memory action (e.g.
+           the single-type mask of a LazyJSON variable) are declared *)
+        if Servpips.typing_check () then
+          List.iter (fun (x, t) -> Servpips.declare_type x t) new_types;
         List.iter (fun (x, t) -> Type_env.update new_gamma x t) new_types;
         List.iter (fun fof -> PFS.extend new_pfs fof) new_fofs;
         let new_pc =

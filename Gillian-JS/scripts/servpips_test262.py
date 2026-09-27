@@ -36,7 +36,7 @@ engine image, --jobs of them in parallel):
                  --tests-file on the tests that fail in wpst-servpips only
 
 In wpst mode (Cosette compilation) an uncaught exception in global code is
-reported as end{error, "main:<n>: Pure assertion failed: false"} (the global
+reported as end{error, "main: Pure assertion failed: false"} (the global
 error assertion of the compiled main); it is the wpst counterpart of error
 mode. A crash of the Cosette pre-parser (JS_PreParser.Unparseable, whose
 message also says "Parsing error") is its own class, preparser-crash, and
@@ -247,7 +247,10 @@ def parse_events(path, max_ends=200):
     return n_ends, dict(status), ends, stats
 
 
-UNCAUGHT_RE = re.compile(r"^main:\d+: Pure assertion failed: false$")
+# end.reason of an uncaught exception at the top level: "main: ..." since the
+# engine dropped the GIL command index from end reasons (perf 78bcfb9),
+# "main:<index>: ..." before
+UNCAUGHT_RE = re.compile(r"^main(:\d+)?: Pure assertion failed: false$")
 
 
 def classify_exec(rc, out, neg, killed):

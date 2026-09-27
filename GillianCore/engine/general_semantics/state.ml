@@ -114,6 +114,12 @@ module type S = sig
       [([], [])]. *)
   val servpips_pc : t -> Expr.t list * (Expr.t * Type.t) list
 
+  (** SERVPIPS (diagnostics, [Servpips.branch_check]): the named mutable
+      parts of the state (store, heap tables, path condition, typing
+      environment, ...), each a heap block compared by physical equality.
+      Names of the path-condition parts start with ["pfs"] or ["gamma"]. *)
+  val servpips_mutables : t -> (string * Obj.t) list
+
   val evaluate_slcmd : 'a MP.prog -> SLCmd.t -> t -> (t, err_t) Res_list.t
 
   (** [match_invariant prog revisited state invariant binders] returns a list of

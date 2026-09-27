@@ -75,6 +75,9 @@ struct
       branch_path : branch_path;
       laction_fuel : int;
       loc : Location.t option;
+      servpips_steps : int;
+          (** SERVPIPS: commands executed on this path since its last branch
+              (a step with several successors); 0 outside SERVPIPS mode *)
     }
     [@@deriving yojson]
 
@@ -130,6 +133,7 @@ struct
         ?prev_cmd_report_id
         ?branch_case
         ?(laction_fuel = 10)
+        ?(servpips_steps = 0)
         () =
       (* TODO this needs some optimising; big concrete tests like Test262 use
          way too much memory due to long branch paths.
@@ -149,6 +153,7 @@ struct
           prev_cmd_report_id;
           branch_case;
           laction_fuel;
+          servpips_steps;
         }
 
     let get_prev_cmd_id = function
@@ -805,6 +810,61 @@ struct
       @param i Current index
       @return List of configurations resulting from the evaluation *)
 
+  (* SERVPIPS (E13 noise): the guard of a decision with the parts that
+     are constant whatever its logical variables are replaced by their
+     value: the element of a list literal at a literal index
+     (l-nth({{x, loc}}, 1) is loc), and the comparison of a term whose type
+     is known without any context with [empty] (a Boolean, number, string,
+     list, ... term is never empty: ((x == null) == empty) is false). The
+     JSIL runtime tests such guards on every property access; they are
+     decided by the reduction whatever the path, and a prune is only
+     reported when a logical variable remains in the guard. *)
+  let servpips_constant_parts (e : Expr.t) : Expr.t =
+    let empty_gamma = Type_env.init () in
+    let known_non_empty (x : Expr.t) =
+      match Typing.type_lexpr empty_gamma x with
+      | Some t, true -> t <> Type.EmptyType
+      | _ -> false
+      | exception _ -> false
+    in
+    let nth (type a) (l : a list) (i : int) : a option =
+      if i >= 0 && i < List.length l then Some (List.nth l i) else None
+    in
+    let lit_index (i : Expr.t) =
+      match i with
+      | Lit (Int z) when Z.fits_int z -> Some (Z.to_int z)
+      | Lit (Num f) when Float.is_integer f && Float.abs f < 1e9 ->
+          Some (int_of_float f)
+      | _ -> None
+    in
+    let rec f (e : Expr.t) : Expr.t =
+      match e with
+      | BinOp (l, LstNth, i) -> (
+          let l = f l and i = f i in
+          match (l, lit_index i) with
+          | EList es, Some n -> (
+              match nth es n with
+              | Some x -> x
+              | None -> BinOp (l, LstNth, i))
+          | Lit (LList ls), Some n -> (
+              match nth ls n with
+              | Some x -> Lit x
+              | None -> BinOp (l, LstNth, i))
+          | _ -> BinOp (l, LstNth, i))
+      | BinOp (a, Equal, b) -> (
+          let a = f a and b = f b in
+          match (a, b) with
+          | Lit Empty, x when known_non_empty x -> Expr.false_
+          | x, Lit Empty when known_non_empty x -> Expr.false_
+          | _ -> BinOp (a, Equal, b))
+      | BinOp (a, op, b) -> BinOp (f a, op, f b)
+      | UnOp (op, a) -> UnOp (op, f a)
+      | NOp (op, l) -> NOp (op, List.map f l)
+      | EList l -> EList (List.map f l)
+      | _ -> e
+    in
+    try f e with _ -> e
+
   module Evaluate_cmd = struct
     type make_confcont =
       state:state_t ->
@@ -816,6 +876,7 @@ struct
       branch_count:int ->
       ?branch_case:branch_case ->
       ?laction_fuel:int ->
+      ?servpips_steps:int ->
       unit ->
       CConf.t
 
@@ -1352,6 +1413,13 @@ struct
                      let branch_case =
                        if has_branched then Some (LCmd, ix) else None
                      in
+                     (* SERVPIPS: each branch of a logic command gets its
+                        own call stack (the stores of the callers are
+                        mutable), as for the other branching commands *)
+                     let cs =
+                       if ix > 0 && Servpips.enabled () then Call_stack.copy cs
+                       else cs
+                     in
                      make_confcont ~state ~callstack:cs
                        ~invariant_frames:iframes ~prev_idx:i ~loop_ids
                        ~next_idx:(i + 1) ~branch_count:b_counter ?branch_case ())
@@ -1448,7 +1516,7 @@ struct
             in
             let guard = Val.to_expr vt in
             if
-              (not (SS.is_empty (Expr.lvars guard_orig)))
+              (not (SS.is_empty (Expr.lvars (servpips_constant_parts guard_orig))))
               || not (SS.is_empty (Expr.lvars guard))
             then
               (* a decision that holds without any context needs no pc *)
@@ -2014,6 +2082,99 @@ struct
       in
       servpips_audit state ~extra ~detail
 
+  (* SERVPIPS (diagnostics): the branch-sharing assertion
+     ([Servpips.branch_check], environment variable SERVPIPS_BRANCH_CHECK).
+     The configurations produced by one step must not share a mutable part:
+     each continuing configuration owns its state (store, heap tables, path
+     condition, typing environment) and the stores of its call stack; a
+     configuration that ends (error, finish) is only reported through its
+     path condition and typing environment, which must not be shared with a
+     sibling either. Within one configuration, the current store and the
+     call-stack stores are pairwise distinct. Only heap blocks are compared
+     (physical equality). *)
+  let servpips_conf_roots (c : CConf.t) : (string * Obj.t) list =
+    let cs_roots (cs : Call_stack.t) =
+      List.concat
+        (List.mapi
+           (fun k (fr : Call_stack.stack_element) ->
+             match fr.store with
+             | Some st ->
+                 [ (Fmt.str "callstack[%d:%s].store" k fr.pid, Obj.repr st) ]
+             | None -> [])
+           cs)
+    in
+    let is_pc (n, _) =
+      String.starts_with ~prefix:"pfs" n || String.starts_with ~prefix:"gamma" n
+    in
+    let roots =
+      match c with
+      | ConfCont { state; callstack; _ } | ConfSusp { state; callstack; _ } ->
+          State.servpips_mutables state @ cs_roots callstack
+      | ConfErr { error_state; _ } ->
+          List.filter is_pc (State.servpips_mutables error_state)
+      | ConfFinish { final_state; _ } ->
+          List.filter is_pc (State.servpips_mutables final_state)
+    in
+    List.filter (fun (_, r) -> Obj.is_block r) roots
+
+  let servpips_check_branches (prog : annot MP.prog) cs i (confs : CConf.t list)
+      =
+    match confs with
+    | [] | [ _ ] -> ()
+    | _ ->
+        let where =
+          lazy
+            (let pid, (_, cmd) = get_cmd prog cs i in
+             let c = Fmt.str "%a" Cmd.pp_indexed cmd in
+             let c = if String.length c > 160 then String.sub c 0 160 else c in
+             Fmt.str "%s:%d %s" pid i c)
+        in
+        let kind = function
+          | CConf.ConfCont _ -> "cont"
+          | ConfErr _ -> "err"
+          | ConfFinish _ -> "finish"
+          | ConfSusp _ -> "susp"
+        in
+        let roots =
+          Array.of_list (List.map (fun c -> (kind c, servpips_conf_roots c)) confs)
+        in
+        let n = Array.length roots in
+        (* within one configuration *)
+        Array.iteri
+          (fun a (ka, ra) ->
+            let rec pairs = function
+              | [] -> ()
+              | (na, xa) :: rest ->
+                  List.iter
+                    (fun (nb, xb) ->
+                      if xa == xb then
+                        Servpips.report_sharing ~where:(Lazy.force where)
+                          (Fmt.str "configuration %d/%d (%s): %s == %s" a n ka
+                             na nb))
+                    rest;
+                  pairs rest
+            in
+            pairs ra)
+          roots;
+        (* between siblings *)
+        for a = 0 to n - 1 do
+          for b = a + 1 to n - 1 do
+            let ka, ra = roots.(a) and kb, rb = roots.(b) in
+            List.iter
+              (fun (na, xa) ->
+                List.iter
+                  (fun (nb, xb) ->
+                    if xa == xb then
+                      Servpips.report_sharing ~where:(Lazy.force where)
+                        (Fmt.str
+                           "sibling configurations %d (%s) and %d (%s) of %d \
+                            share %s / %s"
+                           a ka b kb n na nb))
+                  rb)
+              ra
+          done
+        done
+
   let protected_evaluate_cmd
       (prog : annot MP.prog)
       (state : State.t)
@@ -2051,8 +2212,14 @@ struct
           else simplify state
       | _ -> [ state ]
     in
-    List.concat_map
-      (fun state ->
+    let confs =
+    List.concat
+    @@ List.mapi
+      (fun ix state ->
+        (* SERVPIPS: every state after the first (several states come from
+           a simplification that branched) gets its own call stack, as the
+           branches of the interpreter's own commands do *)
+        let cs = if sp && ix > 0 then Call_stack.copy cs else cs in
         let last_known_loc = ref last_known_loc in
         try
           let confs =
@@ -2118,6 +2285,10 @@ struct
             else servpips_end state ~status ~reason:("exception: " ^ msg) ();
             [])
       states
+    in
+    if sp && Servpips.branch_check () then
+      servpips_check_branches prog cs i confs;
+    confs
 
   (**
   Evaluates one step of a program
@@ -2415,6 +2586,20 @@ struct
           protected_evaluate_cmd prog state cs iframes prev prev_loop_ids i
             b_counter loc parent_id_ref branch_path branch_case laction_fuel
         in
+        (* SERVPIPS: per-path step budget. A step with exactly one
+           continuing successor extends the current branch-free segment;
+           a step with several successors starts new segments (0). *)
+        let next_confs =
+          if Servpips.enabled () then (
+            Servpips.count_step ();
+            match next_confs with
+            | [ ConfCont c' ] ->
+                let n = cconf.servpips_steps + 1 in
+                Servpips.note_segment n;
+                [ ConfCont { c' with servpips_steps = n } ]
+            | _ -> next_confs)
+          else next_confs
+        in
         continue_or_pause ~new_confs:true next_confs
           (fun ?selector () -> f (next_confs @ rest_confs) selector results)
           eval_step_state
@@ -2453,6 +2638,28 @@ struct
         |> Option.iter (fun report_id ->
                parent_id_ref := Some report_id;
                L.Parent.set report_id);
+        continue_or_pause []
+          (fun ?selector () -> f rest_confs selector results)
+          eval_step_state
+
+      (* SERVPIPS: the path executed more commands than the step budget
+         since its last branch (e.g. a loop whose exit condition never
+         becomes true and that never forks, like the regenerator runtime's
+         dispatch loop on an infeasible aliasing path): it is ended as
+         [end{truncated, "step budget"}] and exploration goes on with the
+         other configurations. *)
+      let step_budget (cconf : CConf.cont) eval_step_state =
+        let { f; rest_confs; results; prog; _ } = eval_step_state in
+        let { state; callstack = cs; next_idx = i; servpips_steps; _ } =
+          cconf
+        in
+        let proc_name, _ = get_cmd prog cs i in
+        Printf.eprintf
+          "SERVPIPS: STEP BUDGET STOP (%d commands without a branch) in %s at \
+           cmd %d\n%!"
+          servpips_steps proc_name i;
+        let pc, types = sp_pc state in
+        Servpips.record_step_budget ~pc ~types ();
         continue_or_pause []
           (fun ?selector () -> f rest_confs selector results)
           eval_step_state
@@ -2603,9 +2810,13 @@ struct
 
           match conf with
           | None -> Handle_conf.none eval_step_state
+          | Some (ConfCont ({ branch_count; servpips_steps; _ } as c))
+            when branch_count < !Config.max_branching
+                 && not (Servpips.over_step_budget servpips_steps) ->
+              Handle_conf.cont c eval_step_state
           | Some (ConfCont ({ branch_count; _ } as c))
             when branch_count < !Config.max_branching ->
-              Handle_conf.cont c eval_step_state
+              Handle_conf.step_budget c eval_step_state
           | Some (ConfCont c) -> Handle_conf.max_branch c eval_step_state
           | Some (ConfErr c) -> Handle_conf.err c eval_step_state
           | Some (ConfFinish c) -> Handle_conf.finish c eval_step_state

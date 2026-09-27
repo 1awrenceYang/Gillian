@@ -166,6 +166,7 @@ module Make (PC : ParserAndCompiler.S) = struct
     sp_runtime : string option;
     sp_shard : string option;
     sp_smt_timeout : int option;
+    sp_step_budget : int option;
   }
 
   let servpips_opts =
@@ -220,10 +221,30 @@ module Make (PC : ParserAndCompiler.S) = struct
         & opt (some int) None
         & info [ "smt-timeout" ] ~docs ~doc ~docv:"MS")
     in
-    let f sp_enabled sp_log sp_runtime sp_shard sp_smt_timeout =
-      { sp_enabled; sp_log; sp_runtime; sp_shard; sp_smt_timeout }
+    let step_budget =
+      let doc =
+        "SERVPIPS per-path step budget: a path that executes more commands \
+         than $(docv) since its last branch ends as end{truncated, \"step \
+         budget\"} (0: no budget). Defaults to the SERVPIPS_STEP_BUDGET \
+         environment variable, or 20000000. Requires $(b,--servpips)."
+      in
+      Arg.(
+        value
+        & opt (some int) None
+        & info [ "servpips-step-budget" ] ~docs ~doc ~docv:"N")
     in
-    Term.(const f $ enabled $ log $ runtime $ shard $ smt_timeout)
+    let f sp_enabled sp_log sp_runtime sp_shard sp_smt_timeout sp_step_budget =
+      {
+        sp_enabled;
+        sp_log;
+        sp_runtime;
+        sp_shard;
+        sp_smt_timeout;
+        sp_step_budget;
+      }
+    in
+    Term.(
+      const f $ enabled $ log $ runtime $ shard $ smt_timeout $ step_budget)
 
   (** Applies the SERVPIPS options: sets the SMT timeout, and, when
       [--servpips] is given, enables SERVPIPS mode and emits the [hello]
@@ -246,7 +267,8 @@ module Make (PC : ParserAndCompiler.S) = struct
       in
       needs_flag "--servpips-log" o.sp_log;
       needs_flag "--servpips-runtime" o.sp_runtime;
-      needs_flag "--servpips-shard" o.sp_shard)
+      needs_flag "--servpips-shard" o.sp_shard;
+      needs_flag "--servpips-step-budget" o.sp_step_budget)
     else
       let shard_json =
         match o.sp_shard with
@@ -266,6 +288,11 @@ module Make (PC : ParserAndCompiler.S) = struct
         | Some ms -> ms
         | None -> Option.value (Smt.timeout_ms ()) ~default:(-1)
       in
+      Option.iter
+        (fun n ->
+          if n < 0 then usage_error "--servpips-step-budget must be non-negative";
+          Servpips.set_step_budget n)
+        o.sp_step_budget;
       let log_path = Option.value o.sp_log ~default:Servpips.default_log_path in
       (try
          Servpips.enable

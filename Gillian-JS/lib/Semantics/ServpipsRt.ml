@@ -310,31 +310,58 @@ module Make (E : X.ENV) = struct
      of objects) at every call / note event (integration round 1). *)
   let pc_types st = try S.servpips_pc st with _ -> ([], [])
 
+  (* E13 (round 3): a side that an extern does not explore because it is
+     unsatisfiable in the state [st] (a [sat] answering false, an
+     [assume_all] reduced to false) or because its negation is entailed (an
+     [entails] answering true) is reported as a [prune] event whose dropped
+     side is [f], with the path condition of [st], like a dropped side of
+     the interpreter's own branches; the converter certifies it. Only
+     formulas with logical variables are reported. *)
+  let prune_dropped (st : st) (f : Expr.t) =
+    if not (Gillian.Utils.Containers.SS.is_empty (Expr.lvars f)) then
+      let pc, types = pc_types st in
+      Servpips.record_prune ~guard:f ~guard_orig:f ~kept:"else"
+        ~by:!Servpips.last_decision ~pc ~types ()
+
   (* [assume_all st fs]: copy of [st] with every formula of [fs] assumed, or
      [None] if unsatisfiable. *)
   let assume_all (st : st) (fs : Expr.t list) : st option =
-    guard (fun () ->
-        List.fold_left
-          (fun acc f ->
-            match acc with
-            | None -> None
-            | Some st -> (
-                match Expr.to_literal f with
-                | Some (Bool true) -> Some st
-                | _ -> (
-                    match S.assume st (v_of_expr f) with
-                    | st' :: _ -> Some st'
-                    | [] -> None)))
-          (Some (S.copy st)) fs)
+    let r =
+      guard (fun () ->
+          List.fold_left
+            (fun acc f ->
+              match acc with
+              | None -> None
+              | Some st -> (
+                  match Expr.to_literal f with
+                  | Some (Bool true) -> Some st
+                  | _ -> (
+                      match S.assume st (v_of_expr f) with
+                      | st' :: _ -> Some st'
+                      | [] -> None)))
+            (Some (S.copy st)) fs)
+    in
+    if Option.is_none r then prune_dropped st (Expr.conjunct fs);
+    r
 
-  let sat (st : st) (fs : Expr.t list) : bool =
+  (* without a prune event (for callers that report the decision
+     themselves, e.g. [split]) *)
+  let sat_raw (st : st) (fs : Expr.t list) : bool =
     guard (fun () ->
         match fs with
         | [] -> true
         | _ -> S.sat_check st (v_of_expr (Expr.conjunct fs)))
 
+  let sat (st : st) (fs : Expr.t list) : bool =
+    let r = sat_raw st fs in
+    if not r then prune_dropped st (Expr.conjunct fs);
+    r
+
   let entails (st : st) (fs : Expr.t list) : bool =
-    guard (fun () -> S.assert_a st fs)
+    guard (fun () ->
+        let r = S.assert_a st fs in
+        if r then prune_dropped st (Expr.UnOp (Not, Expr.conjunct fs));
+        r)
 
   (* a fresh spec logical variable of type [ty] *)
   let fresh_var st (ty : Type.t) : st * vt * string =
@@ -1339,10 +1366,10 @@ module Make (E : X.ENV) = struct
       Servpips.record_prune ~guard:f ~guard_orig:f ~kept
         ~by:!Servpips.last_decision ~pc ~types ()
     in
-    if not (sat st [ not_ f ]) then (
+    if not (sat_raw st [ not_ f ]) then (
       prune "then";
       (true, false))
-    else if not (sat st [ f ]) then (
+    else if not (sat_raw st [ f ]) then (
       prune "else";
       (false, true))
     else (true, true)

@@ -52,6 +52,9 @@ module type S = sig
       branch_path : Branch_case.path;
       laction_fuel : int;
       loc : Location.t option;
+      servpips_steps : int;
+          (** SERVPIPS: commands executed on this path since its last branch
+              (a step with several successors); 0 outside SERVPIPS mode *)
     }
 
     (** Equal to conf_cont + the id of the required spec *)

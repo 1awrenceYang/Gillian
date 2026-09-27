@@ -13,6 +13,11 @@ let under_approximation = ref false
     behaviour). *)
 let servpips_semantics = ref false
 
+(* SERVPIPS (diagnostics): keep the shadow path condition of every formula
+   set (every formula ever added to it, see PFS.shadow), for the typing
+   check of SERVPIPS_TYPING_CHECK *)
+let servpips_shadow_pc = ref false
+
 let results_dir, set_result_dir =
   let rd = ref ".gillian" in
   ((fun () -> !rd), fun r -> rd := r)

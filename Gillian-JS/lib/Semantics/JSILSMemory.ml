@@ -160,11 +160,21 @@ module M = struct
                 List.iter (PFS.extend pfs') facts;
                 let gamma' = Type_env.copy gamma in
                 List.iter (fun (x, t) -> Type_env.update gamma' x t) types;
+                let n0 = PFS.length pfs' in
                 match k heap' pfs' gamma' (Expr.ALoc al) with
                 | Ok rets ->
+                    (* formulas that [k] added to this branch's path
+                       condition in place (e.g. set_metadata_core) rather
+                       than in its results: pfs' is this branch's own copy,
+                       which the caller does not see, so they are returned
+                       with the results (they used to be lost) *)
+                    let direct =
+                      List.filteri (fun i _ -> i >= n0) (PFS.to_list pfs')
+                    in
                     Ok
                       (List.map
-                         (fun (h, vs, f, ty) -> (h, vs, facts @ f, types @ ty))
+                         (fun (h, vs, f, ty) ->
+                           (h, vs, facts @ direct @ f, types @ ty))
                          rets)
                 | Error e -> Error e)
               branches
@@ -239,6 +249,30 @@ module M = struct
       Gillian.General.Servpips.record_prune ~guard:f ~guard_orig:f
         ~kept:"else" ~by:"solver" ~pc:(PFS.to_list pfs)
         ~types:(Type_env.to_list_expr gamma) ()
+
+  (* SERVPIPS (R5): [Some es'] when [dom] is an [ESet] whose elements are
+     strictly increasing in Expr.compare order (the form the reduction gives
+     a set of literals), with [es'] the elements plus [p] at its place
+     (unchanged if an element compares equal to [p]); [None] otherwise *)
+  let servpips_sorted_insert (dom : Expr.t) (p : Expr.t) : Expr.t list option =
+    match dom with
+    | ESet es ->
+        let rec sorted = function
+          | a :: (b :: _ as r) -> Expr.compare a b < 0 && sorted r
+          | _ -> true
+        in
+        if not (sorted es) then None
+        else
+          let rec ins acc = function
+            | [] -> List.rev (p :: acc)
+            | x :: r as l ->
+                let c = Expr.compare p x in
+                if c < 0 then List.rev_append acc (p :: l)
+                else if c = 0 then List.rev_append acc l
+                else ins (x :: acc) r
+          in
+          Some (ins [] es)
+    | _ -> None
 
   let get_cell_core
       (heap : t)
@@ -346,13 +380,34 @@ module M = struct
                       NOp (SetUnion, [ dom; ESet [ prop ] ])
                     in
                     let new_domain =
-                      if literal_miss then Reduction.reduce_lexpr new_domain
+                      if literal_miss then
+                        (* SERVPIPS (R5): the reduction of this union is the
+                           sorted, duplicate-free list of the literals
+                           (Expr.Set order); when the domain already is such
+                           a list, inserting the name gives the same result
+                           in one pass instead of two sorts of the whole
+                           domain per miss (quadratic-times-log in the
+                           number of distinct names read on one object) *)
+                        match servpips_sorted_insert dom prop with
+                        | Some es -> Expr.ESet es
+                        | None -> Reduction.reduce_lexpr new_domain
                       else
                         Reduction.reduce_lexpr ?gamma:(Some gamma)
                           ?pfs:(Some pfs) new_domain
                     in
-                    let fv_list' = SFVL.add prop (Lit Nono) fv_list in
-                    SHeap.set heap loc_name fv_list' (Some new_domain) mtdt;
+                    (* SERVPIPS (R5): only the missing name changes: its
+                       tombstone and the domain are recorded directly (the
+                       same heap as SHeap.set with fv_list + {prop: none},
+                       without rebuilding the object's field tables and
+                       creation order, n log n per miss on an object with
+                       n names) *)
+                    if !Gillian.Utils.Config.servpips_semantics then (
+                      SHeap.set_fv_pair heap loc_name prop (Lit Nono);
+                      SHeap.set_dom heap loc_name (Some new_domain))
+                    else
+                      SHeap.set heap loc_name
+                        (SFVL.add prop (Lit Nono) fv_list)
+                        (Some new_domain) mtdt;
                     Ok [ (heap, [ loc; prop; Lit Nono ], [], []) ])
                   else
                     let f_names : Expr.t list = SFVL.field_names fv_list in
@@ -1036,3 +1091,28 @@ let () =
           match ServpipsLazy.owner_of_aloc l with
           | Some (owner, _) -> owner <> x
           | None -> true)
+
+(* SERVPIPS (diagnostics): the mutable parts of a symbolic JS heap, for the
+   branch-sharing assertion (Servpips.branch_check, environment variable
+   SERVPIPS_BRANCH_CHECK): every table and reference of the SHeap record.
+   The symbolic state passes its heap; anything that is not an SHeap record
+   (10 fields) is reported as one block. *)
+let () =
+  Gillian.General.Servpips.heap_mutables :=
+    fun h ->
+      if Obj.is_block h && Obj.tag h = 0 && Obj.size h = 10 then
+        let (heap : SHeap.t) = Obj.obj h in
+        [
+          ("heap", h);
+          ("heap.cfvl", Obj.repr heap.cfvl);
+          ("heap.cdom", Obj.repr heap.cdom);
+          ("heap.cmet", Obj.repr heap.cmet);
+          ("heap.sfvl", Obj.repr heap.sfvl);
+          ("heap.sdom", Obj.repr heap.sdom);
+          ("heap.smet", Obj.repr heap.smet);
+          ("heap.cdmn", Obj.repr heap.cdmn);
+          ("heap.sdmn", Obj.repr heap.sdmn);
+          ("heap.ord", Obj.repr heap.ord);
+          ("heap.occ", Obj.repr heap.occ);
+        ]
+      else [ ("heap", h) ]

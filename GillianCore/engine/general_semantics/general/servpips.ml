@@ -42,6 +42,11 @@ let enable (c : config) =
   enabled_ref := true;
   start_time := Unix.gettimeofday ();
   Config.servpips_semantics := true;
+  (* the shadow path conditions are only kept for the typing check
+     (SERVPIPS_TYPING_CHECK, see typing_check) *)
+  (match Sys.getenv_opt "SERVPIPS_TYPING_CHECK" with
+  | None | Some ("" | "0") -> ()
+  | Some _ -> Config.servpips_shadow_pc := true);
   Smt.servpips_enable ();
   !start_sampler_ref ()
 
@@ -149,6 +154,19 @@ let hello ~unroll () =
            ("unroll", `Int unroll);
            ("smt_timeout_ms", `Int c.smt_timeout_ms);
            ("builtins", with_arith (!hello_builtins ()));
+           (* capability: every type in [types] (end, call, prune, decl) is
+              asserted -- implied by the path condition and the declared
+              types -- never a type inferred while evaluating a term *)
+           ("typing", `String "asserted");
+           (* facts every query of the engine assumes about its terms *)
+           ( "facts",
+             `Assoc
+               [
+                 ("str.len.max", `Int Smt.servpips_max_string_length);
+                 ( "js.num2str.len",
+                   let lo, hi = Smt.servpips_num2str_length in
+                   `List [ `Int lo; `Int hi ] );
+               ] );
          ])
 
 let emit_end ~status ~reason ?outcome ~pc ~types () =
@@ -381,6 +399,44 @@ let record_prune ~guard ~guard_orig ~kept ~by ~pc ~types () =
             ("types", types_json types);
           ]))
 
+(* Per-path step budget (commands executed since the path's last branch). *)
+let default_step_budget = 20_000_000
+
+let step_budget_opt : int option ref = ref None
+
+let step_budget () =
+  match !step_budget_opt with
+  | Some n -> n
+  | None ->
+      let n =
+        match Sys.getenv_opt "SERVPIPS_STEP_BUDGET" with
+        | None | Some "" -> default_step_budget
+        | Some v -> (
+            match int_of_string_opt (String.trim v) with
+            | Some n when n >= 0 -> n
+            | _ -> default_step_budget)
+      in
+      step_budget_opt := Some n;
+      n
+
+let set_step_budget n = step_budget_opt := Some (max 0 n)
+
+let over_step_budget n =
+  !enabled_ref
+  &&
+  let b = step_budget () in
+  b > 0 && n >= b
+
+let steps_total = ref 0
+let steps_max_segment = ref 0
+let step_budget_ends = ref 0
+let count_step () = incr steps_total
+let note_segment n = if n > !steps_max_segment then steps_max_segment := n
+
+let record_step_budget ~pc ~types () =
+  incr step_budget_ends;
+  record_end ~status:"truncated" ~reason:"step budget" ~pc ~types ()
+
 let note_unknown ~entailment =
   if entailment then (
     counters.entail_unknown <- counters.entail_unknown + 1;
@@ -463,7 +519,72 @@ let emit_stats () =
              | Some s -> `String s );
            ("seconds", `Float (Unix.gettimeofday () -. !start_time));
            ("rss_mb", rss_mb ());
+           ( "steps",
+             `Assoc
+               [
+                 ("total", `Int !steps_total);
+                 ("max_segment", `Int !steps_max_segment);
+                 ("budget", `Int (step_budget ()));
+                 ("budget_ends", `Int !step_budget_ends);
+               ] );
          ]))
+
+(* Branch-sharing assertion (diagnostics only; never changes results). *)
+let branch_check_on =
+  lazy
+    (match Sys.getenv_opt "SERVPIPS_BRANCH_CHECK" with
+    | None | Some ("" | "0") -> false
+    | Some _ -> true)
+
+let branch_check () = !enabled_ref && Lazy.force branch_check_on
+
+let heap_mutables : (Obj.t -> (string * Obj.t) list) ref =
+  ref (fun h -> [ ("heap", h) ])
+
+let sharing_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
+let sharing_count = ref 0
+
+let report_sharing ~where (msg : string) =
+  incr sharing_count;
+  let key = where ^ " | " ^ msg in
+  if not (Hashtbl.mem sharing_seen key) then (
+    Hashtbl.replace sharing_seen key ();
+    let msg = truncate_reason ~max:600 (where ^ ": " ^ msg) in
+    prerr_endline ("SERVPIPS branch-sharing: " ^ msg);
+    note ~code:"branch-sharing" ~msg ();
+    set_fatal ("branch-sharing: " ^ msg))
+
+(* Typing check (diagnostics only; never changes results). *)
+let typing_check_on =
+  lazy
+    (match Sys.getenv_opt "SERVPIPS_TYPING_CHECK" with
+    | None | Some ("" | "0") -> false
+    | Some _ -> true)
+
+let typing_check () = !enabled_ref && Lazy.force typing_check_on
+
+let declared_types : (string * Type.t, unit) Hashtbl.t = Hashtbl.create 256
+
+let declare_type x t =
+  if typing_check () then Hashtbl.replace declared_types (x, t) ()
+
+let is_declared_type x t = Hashtbl.mem declared_types (x, t)
+let unasserted_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
+let unasserted_count = ref 0
+
+let report_unasserted (msg : string) =
+  incr unasserted_count;
+  if not (Hashtbl.mem unasserted_seen msg) then (
+    Hashtbl.replace unasserted_seen msg ();
+    let msg = truncate_reason ~max:1500 msg in
+    prerr_endline ("SERVPIPS typing-unasserted: " ^ msg);
+    (match Sys.getenv_opt "SERVPIPS_TYPING_CHECK" with
+    | Some "trace" ->
+        prerr_endline
+          (Printexc.raw_backtrace_to_string (Printexc.get_callstack 25))
+    | _ -> ());
+    note ~code:"typing-unasserted" ~msg ();
+    set_fatal ("typing-unasserted: " ^ msg))
 
 (* Sampling profiler (diagnostics only; never changes results). *)
 let sampling = ref false

@@ -131,6 +131,9 @@ end = struct
 
   let servpips_pc (_ : t) = ([], [])
 
+  let servpips_mutables ((heap, store, _) : t) =
+    [ ("store", Obj.repr store); ("heap", Obj.repr heap) ]
+
   let run_spec
       (_ : MP.spec)
       (_ : string)
