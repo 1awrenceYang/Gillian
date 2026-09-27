@@ -385,6 +385,44 @@ let record_prune ~guard ~guard_orig ~kept ~by ~pc ~types () =
             ("types", types_json types);
           ]))
 
+(* Per-path step budget (commands executed since the path's last branch). *)
+let default_step_budget = 20_000_000
+
+let step_budget_opt : int option ref = ref None
+
+let step_budget () =
+  match !step_budget_opt with
+  | Some n -> n
+  | None ->
+      let n =
+        match Sys.getenv_opt "SERVPIPS_STEP_BUDGET" with
+        | None | Some "" -> default_step_budget
+        | Some v -> (
+            match int_of_string_opt (String.trim v) with
+            | Some n when n >= 0 -> n
+            | _ -> default_step_budget)
+      in
+      step_budget_opt := Some n;
+      n
+
+let set_step_budget n = step_budget_opt := Some (max 0 n)
+
+let over_step_budget n =
+  !enabled_ref
+  &&
+  let b = step_budget () in
+  b > 0 && n >= b
+
+let steps_total = ref 0
+let steps_max_segment = ref 0
+let step_budget_ends = ref 0
+let count_step () = incr steps_total
+let note_segment n = if n > !steps_max_segment then steps_max_segment := n
+
+let record_step_budget ~pc ~types () =
+  incr step_budget_ends;
+  record_end ~status:"truncated" ~reason:"step budget" ~pc ~types ()
+
 let note_unknown ~entailment =
   if entailment then (
     counters.entail_unknown <- counters.entail_unknown + 1;
@@ -467,6 +505,14 @@ let emit_stats () =
              | Some s -> `String s );
            ("seconds", `Float (Unix.gettimeofday () -. !start_time));
            ("rss_mb", rss_mb ());
+           ( "steps",
+             `Assoc
+               [
+                 ("total", `Int !steps_total);
+                 ("max_segment", `Int !steps_max_segment);
+                 ("budget", `Int (step_budget ()));
+                 ("budget_ends", `Int !step_budget_ends);
+               ] );
          ]))
 
 (* Branch-sharing assertion (diagnostics only; never changes results). *)

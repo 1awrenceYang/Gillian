@@ -75,6 +75,9 @@ struct
       branch_path : branch_path;
       laction_fuel : int;
       loc : Location.t option;
+      servpips_steps : int;
+          (** SERVPIPS: commands executed on this path since its last branch
+              (a step with several successors); 0 outside SERVPIPS mode *)
     }
     [@@deriving yojson]
 
@@ -130,6 +133,7 @@ struct
         ?prev_cmd_report_id
         ?branch_case
         ?(laction_fuel = 10)
+        ?(servpips_steps = 0)
         () =
       (* TODO this needs some optimising; big concrete tests like Test262 use
          way too much memory due to long branch paths.
@@ -149,6 +153,7 @@ struct
           prev_cmd_report_id;
           branch_case;
           laction_fuel;
+          servpips_steps;
         }
 
     let get_prev_cmd_id = function
@@ -816,6 +821,7 @@ struct
       branch_count:int ->
       ?branch_case:branch_case ->
       ?laction_fuel:int ->
+      ?servpips_steps:int ->
       unit ->
       CConf.t
 
@@ -2525,6 +2531,20 @@ struct
           protected_evaluate_cmd prog state cs iframes prev prev_loop_ids i
             b_counter loc parent_id_ref branch_path branch_case laction_fuel
         in
+        (* SERVPIPS: per-path step budget. A step with exactly one
+           continuing successor extends the current branch-free segment;
+           a step with several successors starts new segments (0). *)
+        let next_confs =
+          if Servpips.enabled () then (
+            Servpips.count_step ();
+            match next_confs with
+            | [ ConfCont c' ] ->
+                let n = cconf.servpips_steps + 1 in
+                Servpips.note_segment n;
+                [ ConfCont { c' with servpips_steps = n } ]
+            | _ -> next_confs)
+          else next_confs
+        in
         continue_or_pause ~new_confs:true next_confs
           (fun ?selector () -> f (next_confs @ rest_confs) selector results)
           eval_step_state
@@ -2563,6 +2583,28 @@ struct
         |> Option.iter (fun report_id ->
                parent_id_ref := Some report_id;
                L.Parent.set report_id);
+        continue_or_pause []
+          (fun ?selector () -> f rest_confs selector results)
+          eval_step_state
+
+      (* SERVPIPS: the path executed more commands than the step budget
+         since its last branch (e.g. a loop whose exit condition never
+         becomes true and that never forks, like the regenerator runtime's
+         dispatch loop on an infeasible aliasing path): it is ended as
+         [end{truncated, "step budget"}] and exploration goes on with the
+         other configurations. *)
+      let step_budget (cconf : CConf.cont) eval_step_state =
+        let { f; rest_confs; results; prog; _ } = eval_step_state in
+        let { state; callstack = cs; next_idx = i; servpips_steps; _ } =
+          cconf
+        in
+        let proc_name, _ = get_cmd prog cs i in
+        Printf.eprintf
+          "SERVPIPS: STEP BUDGET STOP (%d commands without a branch) in %s at \
+           cmd %d\n%!"
+          servpips_steps proc_name i;
+        let pc, types = sp_pc state in
+        Servpips.record_step_budget ~pc ~types ();
         continue_or_pause []
           (fun ?selector () -> f rest_confs selector results)
           eval_step_state
@@ -2713,9 +2755,13 @@ struct
 
           match conf with
           | None -> Handle_conf.none eval_step_state
+          | Some (ConfCont ({ branch_count; servpips_steps; _ } as c))
+            when branch_count < !Config.max_branching
+                 && not (Servpips.over_step_budget servpips_steps) ->
+              Handle_conf.cont c eval_step_state
           | Some (ConfCont ({ branch_count; _ } as c))
             when branch_count < !Config.max_branching ->
-              Handle_conf.cont c eval_step_state
+              Handle_conf.step_budget c eval_step_state
           | Some (ConfCont c) -> Handle_conf.max_branch c eval_step_state
           | Some (ConfErr c) -> Handle_conf.err c eval_step_state
           | Some (ConfFinish c) -> Handle_conf.finish c eval_step_state

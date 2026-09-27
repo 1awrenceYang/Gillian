@@ -236,6 +236,42 @@ val record_prune :
   unit ->
   unit
 
+(** {2 Per-path step budget}
+
+    Every configuration counts the commands executed on its path since the
+    path's last branch (a step with several successors). A configuration
+    whose count reaches the budget ends as [end{truncated, "step budget"}]
+    and the other configurations are explored further: a loop that never
+    forks and never exits (e.g. the regenerator runtime's dispatch loop on
+    an infeasible aliasing path) cannot block the shard until its time
+    budget. The budget is [wpst --servpips-step-budget N], else the
+    environment variable [SERVPIPS_STEP_BUDGET] (a number of commands; [0]
+    turns it off), else {!default_step_budget}. *)
+
+val default_step_budget : int
+
+(** The effective budget ([0]: none). *)
+val step_budget : unit -> int
+
+(** Set the budget ([--servpips-step-budget]). *)
+val set_step_budget : int -> unit
+
+(** [over_step_budget n]: SERVPIPS mode is on and [n] commands without a
+    branch reach the budget. *)
+val over_step_budget : int -> bool
+
+(** Count one executed command (for [stats.steps.total]). *)
+val count_step : unit -> unit
+
+(** A branch-free segment has reached [n] commands (for
+    [stats.steps.max_segment]). *)
+val note_segment : int -> unit
+
+(** [end{truncated, "step budget"}] for a configuration over the budget
+    (counted in [stats.steps.budget_ends]). *)
+val record_step_budget :
+  pc:Expr.t list -> types:(Expr.t * Type.t) list -> unit -> unit
+
 (** A solver query answered [unknown] was treated as satisfiable (sat query)
     or as not entailed (entailment query): emit
     [note{unknown-assumed-sat}] or [note{entail-unknown}] and count it (E3). *)
@@ -255,7 +291,10 @@ val fatal : unit -> string option
     [{"ev":"stats","leaves":..,"ends":{..},"infeasible":..,"vanished":..,
       "prunes":..,"max_branch":..,"solver":{"queries":..,
       "unknown_assumed_sat":..,"entail_unknown":..,"encode_failures":..},
-      "fatal":null|"..","seconds":..,"rss_mb":..}] *)
+      "fatal":null|"..","seconds":..,"rss_mb":..,
+      "steps":{"total":..,"max_segment":..,"budget":..,"budget_ends":..}}]
+    ([steps]: commands executed, the longest branch-free segment of a path,
+    the step budget and the number of paths it ended). *)
 val emit_stats : unit -> unit
 
 (** {2 Branch-sharing assertion (diagnostics only)}
