@@ -1,0 +1,25 @@
+(* SERVPIPS-ARGS: -a *)
+(* SERVPIPS WP1 core probe (round 3, from mem3): a typed comparison inside a
+   disjunction of the path condition, the shape of a LazyJSON type mask with
+   a numeric range, string | integer in [0, 10]. On the side where u is a
+   List (as the JSIL runtime asks for references), the second disjunct is
+   ill-typed; the reduction of (u <= 10.) typed the term (10. - u) and
+   raised "TYPE ERROR: (10. - u) not typable" there, which ended the
+   configuration and its siblings with an error (1 leaf). Now the List side
+   is pruned, the range holds on the Num side (10. < u pruned) and both the
+   Num and the Str paths return. *)
+proc main() {
+          u := fresh_svar();
+          assume ((((typeOf u) == Str) or (((((typeOf u) == Num) and (0. <= u)) and (u <= 10.)) and (is_int u))));
+          goto [((typeOf u) == List)] lst other;
+  lst:    ret := 0.;
+          goto done;
+  other:  goto [((typeOf u) == Num)] num str;
+  num:    goto [(10. < u)] big small;
+  big:    ret := 1.;
+          goto done;
+  small:  ret := 2.;
+          goto done;
+  str:    ret := 3.;
+  done:   return
+};
