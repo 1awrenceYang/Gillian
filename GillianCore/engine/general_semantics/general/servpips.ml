@@ -149,6 +149,10 @@ let hello ~unroll () =
            ("unroll", `Int unroll);
            ("smt_timeout_ms", `Int c.smt_timeout_ms);
            ("builtins", with_arith (!hello_builtins ()));
+           (* capability: every type in [types] (end, call, prune, decl) is
+              asserted -- implied by the path condition and the declared
+              types -- never a type inferred while evaluating a term *)
+           ("typing", `String "asserted");
          ])
 
 let emit_end ~status ~reason ?outcome ~pc ~types () =

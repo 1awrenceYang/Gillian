@@ -97,7 +97,17 @@ val hello_builtins : (unit -> Yojson.Safe.t) ref
 
 (** Emit the [hello] event:
     [{"ev":"hello","v":2,"fork":..,"z3":..,"shard":..,"unroll":..,
-      "smt_timeout_ms":..,"builtins":..}] *)
+      "smt_timeout_ms":..,"builtins":..,"typing":"asserted"}].
+
+    [typing] is a capability: ["asserted"] means that the typing
+    environment reported in [types] (of [end], [call], [prune], [decl]) only
+    holds asserted types -- consequences of the path condition (typeOf
+    facts, typed equalities, after simplification) and of declared types --
+    and never a type Gillian inferred while evaluating a term (the SERVPIPS
+    typing mode since round 2: [Typing] does not commit inferred types, and
+    reverse type inference does not look under disjunctions, implications,
+    negations or [ite.*]). A converter may therefore state every reported
+    type as a fact. Absent in engines before round 3. *)
 val hello : unroll:int -> unit -> unit
 
 (** Emit an [end] event:
