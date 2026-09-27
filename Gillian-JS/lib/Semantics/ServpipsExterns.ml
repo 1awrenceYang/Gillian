@@ -140,22 +140,10 @@ let log : handler =
                     `String ("<error: " ^ Printexc.to_string exn ^ ">") );
                 ]
         in
-        let asrt =
-          E.State.to_assertions ~to_keep:Containers.SS.empty state
-        in
-        let pure =
-          List.filter_map
-            (function
-              | Asrt.Pure f -> Some f
-              | _ -> None)
-            asrt
-        in
-        let types =
-          List.concat_map
-            (function
-              | Asrt.Types l -> l
-              | _ -> [])
-            asrt
+        (* the path condition and types without converting the heap
+           (State.servpips_pc; State.to_assertions walked the whole heap) *)
+        let pure, types =
+          try E.State.servpips_pc state with _ -> ([], [])
         in
         let tag, rest =
           match v_args with
