@@ -81,12 +81,14 @@ proc getOwnProperty (l, prop) {
 };
 
 (*
- * SERVPIPS hooks (design E11; inert unless the program uses SERVPIPS special
- * forms or --servpips is on, see Semantics/ServpipsRt.mli):
- *  - miss: if the metadata of l has @sp_resolver R, call R(l, prop) (JS
- *    calling convention, exceptions propagate) and look prop up again;
- *  - hit: if prop is in the @sp_lazykeys of l (lazily created, never
- *    written), the property exists iff its value is not undefined.
+ * SERVPIPS hook (design E11; inert unless the program uses SERVPIPS special
+ * forms or --servpips is on, see Semantics/ServpipsRt.mli): on a miss, if
+ * the metadata of l has @sp_resolver R, call R(l, prop) (JS calling
+ * convention, exceptions propagate) and look prop up again.
+ * A cell of a key in @sp_lazykeys whose value is undefined is returned as
+ * is (a "phantom" cell): [[Get]], [[CanPut]], [[DefineOwnProperty]] and
+ * [[Delete]] give the same results with it; the existence tests use
+ * i__getOwnPropertyE / i__getPropertyE below.
  *)
 proc o__getOwnProperty (l, prop) {
           x := hasField(l, prop);
@@ -106,10 +108,44 @@ proc o__getOwnProperty (l, prop) {
           goto rlab;
 
     hp:   ret := [l, prop];		  (* Field exists; rtrn the descriptor *)
-          lz := extern servpips_lazykey (l, prop);
+
+    rlab: return;
+    elab: throw
+};
+
+(*
+ * SERVPIPS (design E11, section 3.2): [[GetOwnProperty]] / [[GetProperty]]
+ * with the existence rule of lazily created keys: if prop is in the
+ * @sp_lazykeys of the object (created lazily, never written), the property
+ * exists iff its value is not undefined (forks when that is unknown). Used
+ * by HasProperty (in, Array methods), hasOwnProperty, propertyIsEnumerable
+ * and getOwnPropertyDescriptor.
+ *)
+proc i__getOwnPropertyE (l, prop) {
+          ret := "getOwnProperty" (l, prop) with elab;
+          goto [ret = undefined] rlab chk;
+
+    chk:  lz := extern servpips_lazykey (l, prop);
           goto [lz] lzv rlab;
 
     lzv:  goto [(l-nth (ret, 1)) = undefined] und rlab;
+
+    und:  ret := undefined;
+
+    rlab: return;
+    elab: throw
+};
+
+proc i__getPropertyE (l, prop) {
+
+		  ret := "i__getOwnPropertyE" (l, prop) with elab;
+		  goto [ret = undefined] next rlab;
+
+    next: m := metadata(l);
+          proto := [m, "@proto"];
+          goto [proto = null] rlab call;
+
+    call: ret := "i__getPropertyE" (proto, prop) with elab;
 
     rlab: return;
     elab: throw
@@ -246,7 +282,7 @@ proc put (l, prop, value, thrw) {
 (* *********** *)
 
 proc hasProperty (l, prop) {
-			ret := "getProperty" (l, prop) with elab;
+			ret := "i__getPropertyE" (l, prop) with elab;
 			goto [ret = undefined] miss rlab;
 
 			(* SERVPIPS (E11): as in get *)
