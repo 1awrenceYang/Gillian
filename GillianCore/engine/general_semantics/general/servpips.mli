@@ -239,3 +239,16 @@ val fatal : unit -> string option
       "unknown_assumed_sat":..,"entail_unknown":..,"encode_failures":..},
       "fatal":null|"..","seconds":..,"rss_mb":..}] *)
 val emit_stats : unit -> unit
+
+(** {2 Sampling profiler (diagnostics only)}
+
+    With the environment variable [SERVPIPS_SAMPLE=<file>[:<ms>]] (default
+    10 ms), {!start_sampler} installs a SIGPROF timer; every [<ms>] of CPU
+    time one line [<n> TAB <seconds> TAB <current rss MB> TAB <hook>] is
+    appended to [<file>], where [<hook>] is the result of {!sample_hook}
+    (the interpreter sets it to its current position: procedure, command
+    index, call stack, JS source locations, pending configurations). *)
+
+val sampling : bool ref
+val sample_hook : (unit -> string) ref
+val start_sampler : unit -> unit

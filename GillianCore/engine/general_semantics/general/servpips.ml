@@ -18,6 +18,7 @@ let default_config () =
   }
 
 let enabled_ref = ref false
+let start_sampler_ref : (unit -> unit) ref = ref (fun () -> ())
 let start_time = ref (Unix.gettimeofday ())
 let config_ref : config option ref = ref None
 let chan : out_channel option ref = ref None
@@ -41,7 +42,8 @@ let enable (c : config) =
   enabled_ref := true;
   start_time := Unix.gettimeofday ();
   Config.servpips_semantics := true;
-  Smt.servpips_enable ()
+  Smt.servpips_enable ();
+  !start_sampler_ref ()
 
 (* Non-finite floats are not JSON: encode them as {"nonfinite": ...}. *)
 let rec encode_nonfinite (j : Yojson.Safe.t) : Yojson.Safe.t =
@@ -441,3 +443,51 @@ let emit_stats () =
            ("seconds", `Float (Unix.gettimeofday () -. !start_time));
            ("rss_mb", rss_mb ());
          ]))
+
+(* Sampling profiler (diagnostics only; never changes results). *)
+let sampling = ref false
+let sample_hook : (unit -> string) ref = ref (fun () -> "")
+
+let current_rss_mb () =
+  try
+    let ic = open_in "/proc/self/statm" in
+    let r = Scanf.sscanf (input_line ic) "%d %d" (fun _ rss -> rss) in
+    close_in_noerr ic;
+    r * 4096 / 1048576
+  with _ -> -1
+
+let start_sampler () =
+  match Sys.getenv_opt "SERVPIPS_SAMPLE" with
+  | None | Some "" -> ()
+  | Some spec ->
+      let file, ms =
+        match String.rindex_opt spec ':' with
+        | Some i -> (
+            let f = String.sub spec 0 i in
+            let t = String.sub spec (i + 1) (String.length spec - i - 1) in
+            match int_of_string_opt t with
+            | Some ms when ms > 0 -> (f, ms)
+            | _ -> (spec, 10))
+        | None -> (spec, 10)
+      in
+      let oc = open_out file in
+      let n = ref 0 in
+      let t0 = Unix.gettimeofday () in
+      sampling := true;
+      Sys.set_signal Sys.sigprof
+        (Sys.Signal_handle
+           (fun _ ->
+             incr n;
+             let line =
+               try !sample_hook () with e -> "exn " ^ Printexc.to_string e
+             in
+             Printf.fprintf oc "%d\t%.2f\t%d\t%s\n" !n
+               (Unix.gettimeofday () -. t0)
+               (current_rss_mb ()) line;
+             flush oc));
+      let iv = float_of_int ms /. 1000. in
+      ignore
+        (Unix.setitimer Unix.ITIMER_PROF
+           { Unix.it_interval = iv; Unix.it_value = iv })
+
+let () = start_sampler_ref := start_sampler
