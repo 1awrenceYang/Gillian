@@ -1314,7 +1314,13 @@ proc i__abstractComparison (v1, v2, leftFirst) {
 			ret := "i__toNumber" (py) with elab;
 			ny := ret;
 
-			goto [(not (nx = nx)) or (not (ny = ny))] ru eq;
+			goto [(not (nx = nx)) or (not (ny = ny))] ru speq;
+
+			(* SERVPIPS: nx < ny is already false when nx = ny (IEEE, also
+			   for +0/-0 and equal infinities), so with --servpips the
+			   equality test (a fork on symbolic numbers) is skipped *)
+	speq:	en := extern servpips_enabled ();
+			goto [en] sl eq;
 
 	eq:	goto [nx = ny] rf sl;
 
