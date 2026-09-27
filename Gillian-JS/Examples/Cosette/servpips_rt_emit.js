@@ -16,5 +16,9 @@ if (n > 3) {
   __servpips_emit("note", "small", "n<=3", { v: n });
   __servpips_emit("end", "returned", "done early");
 }
+/* an assumption that is false on this path drops it (counted as infeasible
+   by the engine core) */
+if (n === 42) { __servpips_assume(false); __servpips_emit("note", "unreachable", ""); }
+if (n === 43) { __servpips_assume(__servpips_fn("=", n, 44)); __servpips_emit("note", "unreachable2", ""); }
 var c1 = __servpips_is_concrete(3), c2 = __servpips_is_concrete(n);
 __servpips_emit("note", "conc", (c1 ? "t" : "f") + (c2 ? "t" : "f"));
