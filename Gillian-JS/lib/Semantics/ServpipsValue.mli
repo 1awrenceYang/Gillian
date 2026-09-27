@@ -36,5 +36,7 @@ val serialize :
 val serialize_ms : ServpipsLazy.mstate -> Expr.t -> Yojson.Safe.t
 
 (** Extern [servpips_debug_vt(tag, v)] (debug/test aid, not part of I2-SF):
-    emits [{"ev":"note","code":"vt","msg":tag,"site":null,"data":VT}]. *)
+    emits [{"ev":"note","code":"vt","msg":tag,"site":null,
+    "data":{"vt":VT,"pc":PC,"types":T}}] (the path condition and types of the
+    current state, as in [call] events). *)
 val x_debug_vt : ServpipsExterns.handler

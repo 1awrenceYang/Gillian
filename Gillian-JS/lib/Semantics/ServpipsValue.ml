@@ -260,7 +260,8 @@ let serialize (heap : SHeap.t) pfs gamma (v : Expr.t) : J.t =
 
 (* ------------------------------------------------------------------------ *)
 (* Debug extern (not part of I2-SF): __servpips_debug_vt(tag, v) emits       *)
-(* {"ev":"note","code":"vt","msg":tag,"site":null,"data":<VT of v>}.         *)
+(* {"ev":"note","code":"vt","msg":tag,"site":null,                           *)
+(*  "data":{"vt":<VT of v>,"pc":<PC>,"types":<T>}}.                          *)
 (* Used by the servpips_mem_* regression tests of E17.                       *)
 (* ------------------------------------------------------------------------ *)
 
@@ -285,7 +286,19 @@ let x_debug_vt : ServpipsExterns.handler =
           | [] -> ("", E.Val.from_literal Undefined)
         in
         let j = SL.Ext.serialize env state v in
-        Servpips.note ~code:"vt" ~msg:tag ~data:j ();
+        let pc, types =
+          Servpips.pc_and_types_of_asrt
+            (E.State.to_assertions ~to_keep:Containers.SS.empty state)
+        in
+        Servpips.note ~code:"vt" ~msg:tag
+          ~data:
+            (`Assoc
+              [
+                ("vt", j);
+                ("pc", Servpips.pc_json pc);
+                ("types", Servpips.types_json types);
+              ])
+          ();
         [ ServpipsExterns.Return (state, E.Val.from_literal Undefined) ]);
   }
 

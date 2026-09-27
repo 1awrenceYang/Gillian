@@ -58,6 +58,24 @@ let sat (ms : mstate) ?(gamma = ms.gamma) (fs : Expr.t list) : bool =
 let reduce (ms : mstate) (e : Expr.t) : Expr.t =
   try Reduction.reduce_lexpr ~pfs:ms.pfs ~gamma:ms.gamma e with _ -> e
 
+(** A literal equal to [e] on this path, if the reduction or an equality of
+    the path condition gives one. *)
+let concrete_of (ms : mstate) (e : Expr.t) : Expr.t option =
+  match reduce ms e with
+  | Lit _ as l -> Some l
+  | e' ->
+      PFS.fold_left
+        (fun ac f ->
+          match ac with
+          | Some _ -> ac
+          | None -> (
+              let is_e a = Expr.equal a e || Expr.equal a e' in
+              match f with
+              | Expr.BinOp (a, Equal, (Lit _ as l)) when is_e a -> Some l
+              | Expr.BinOp ((Lit _ as l), Equal, a) when is_e a -> Some l
+              | _ -> None))
+        None ms.pfs
+
 let gamma_with (ms : mstate) (types : (string * Type.t) list) : Type_env.t =
   match types with
   | [] -> ms.gamma
@@ -1046,8 +1064,8 @@ let get_all_props (ms : mstate) (loc : string) :
         match array_len_kind c.members with
         | Fixed n -> n
         | Sym -> (
-            match reduce ms (Expr.LVar (len_var info c)) with
-            | Lit (Num f) when Float.is_integer f && f >= 0. && f < 1e7 ->
+            match concrete_of ms (Expr.LVar (len_var info c)) with
+            | Some (Lit (Num f)) when Float.is_integer f && f >= 0. && f < 1e7 ->
                 int_of_float f
             | _ -> unsupported "enumeration of an input array of symbolic length")
       in
