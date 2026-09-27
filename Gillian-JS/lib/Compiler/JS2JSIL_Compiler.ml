@@ -1403,7 +1403,15 @@ let rec translate_expr tr_ctx e :
   | JS_Parser.Syntax.Null -> (annotate_first_cmd [], Lit Null, [])
   | JS_Parser.Syntax.Bool b -> (annotate_first_cmd [], Lit (Bool b), [])
   | JS_Parser.Syntax.String s ->
-      let escaped_s = Str.global_replace (Str.regexp "\"") "\\\"" s in
+      (* SERVPIPS: upstream stores every double quote of a string literal
+         as a backslash-quote pair, so that a burned .jsil file re-parses;
+         the value of the literal is then wrong ('"'.length === 2). Under
+         the SERVPIPS semantics (wpst/exec --servpips) the program is
+         executed from memory and the literal keeps its exact value. *)
+      let escaped_s =
+        if !Gillian.Utils.Config.servpips_semantics then s
+        else Str.global_replace (Str.regexp "\"") "\\\"" s
+      in
       (annotate_first_cmd [], Lit (String escaped_s), [])
   | JS_Parser.Syntax.Num n -> (annotate_first_cmd [], Lit (Num n), [])
   (*
