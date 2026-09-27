@@ -2090,12 +2090,22 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
    hit -- it cannot be recomputed from the encoded terms without re-encoding. *)
 let encode_assertions (fs : Expr.Set.t) (gamma : typenv) :
     sexp list * (int, definition) Hashtbl.t =
-  let- () = Hashtbl.find_opt encoding_cache fs in
+  (* SERVPIPS: no encoding cache. It is keyed by the formulas only, but the
+     encoding depends on the typing environment too (the sort of every
+     typed variable); and every query is encoded once anyway, its answer
+     being kept by [check_sat]'s cache, so the table only held the
+     encodings of every query of the run (most of the memory growth of
+     long shards) *)
+  let- () =
+    if !servpips_mode then None else Hashtbl.find_opt encoding_cache fs
+  in
   let result =
     with_necessary_definitions @@ fun () ->
     encode_assertions_needs_handler fs gamma
   in
-  let () = Hashtbl.replace encoding_cache fs result in
+  let () =
+    if not !servpips_mode then Hashtbl.replace encoding_cache fs result
+  in
   result
 
 module Dump = struct
@@ -2214,7 +2224,76 @@ let exec_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
     in
     raise Gillian_result.Exc.(internal_error ~additional_data "SMT failure")
 
+(* SERVPIPS: the answer cache of [check_sat] in SERVPIPS mode. The key is
+   the formulas together with the types the typing environment gives their
+   logical variables: upstream keys by the formulas alone, although the
+   encoding (and so the answer) depends on those types, e.g. [not (x = true)
+   /\ not (x = false)] is unsatisfiable when [x] is typed Bool and
+   satisfiable when it is not; a cached "unsatisfiable" reused under
+   another environment could drop a feasible branch. The hash covers every
+   formula (the polymorphic hash only looks at a few nodes: sets sharing a
+   prefix collided and were compared in full), and the table is emptied
+   when it reaches SERVPIPS_SMT_CACHE entries (default 50000) so that long
+   shards do not keep every query of the run. *)
+module Servpips_sat_cache = struct
+  type key = Expr.Set.t * (string * Type.t) list
+
+  module Tbl = Hashtbl.Make (struct
+    type t = key
+
+    let equal ((f1, t1) : t) ((f2, t2) : t) =
+      List.equal
+        (fun (x, a) (y, b) -> String.equal x y && a = b)
+        t1 t2
+      && Expr.Set.equal f1 f2
+
+    let hash ((fs, ts) : t) =
+      let mix h x = (h * 65599) + Hashtbl.hash x in
+      let h = Expr.Set.fold (fun e h -> mix h e) fs 17 in
+      List.fold_left mix h ts land max_int
+  end)
+
+  let max_entries =
+    match Sys.getenv_opt "SERVPIPS_SMT_CACHE" with
+    | Some s -> (
+        match int_of_string_opt (String.trim s) with
+        | Some n when n > 0 -> n
+        | _ -> 50000)
+    | None -> 50000
+
+  let tbl : sexp option Tbl.t = Tbl.create 4096
+
+  let key (fs : Expr.Set.t) (gamma : typenv) : key =
+    let vars =
+      Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty
+    in
+    let ts =
+      SS.fold
+        (fun x acc ->
+          match Hashtbl.find_opt gamma x with
+          | Some t -> (x, t) :: acc
+          | None -> acc)
+        vars []
+    in
+    (fs, ts)
+
+  let find k = Tbl.find_opt tbl k
+
+  let add k v =
+    if Tbl.length tbl >= max_entries then Tbl.reset tbl;
+    Tbl.replace tbl k v
+end
+
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
+  if !servpips_mode then (
+    let k = Servpips_sat_cache.key fs gamma in
+    match Servpips_sat_cache.find k with
+    | Some result -> result
+    | None ->
+        let ret = exec_sat fs gamma in
+        Servpips_sat_cache.add k ret;
+        ret)
+  else
   match Hashtbl.find_opt sat_cache fs with
   | Some result ->
       let () =

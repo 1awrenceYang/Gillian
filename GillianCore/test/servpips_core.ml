@@ -743,6 +743,21 @@ let test_smt_comparison_kind () =
     [ Expr.ForAll ([ ("#q", Some Type.NumberType) ], lt (lv "#q") (num 3.)) ]
     []
 
+let test_sat_cache_types () =
+  (* SERVPIPS: the answer cache of Smt.check_sat is keyed by the formulas and
+     the types of their variables: the same formulas are unsatisfiable when
+     #cb is typed Bool and satisfiable when it is not typed *)
+  let fs =
+    [
+      Expr.UnOp (Not, eq (lv "#cb") (Lit (Bool true)));
+      Expr.UnOp (Not, eq (lv "#cb") (Lit (Bool false)));
+    ]
+  in
+  Alcotest.check res "typed Bool" `Unsat (sat ~gamma:[ ("#cb", Type.BooleanType) ] fs);
+  Alcotest.check res "untyped, same formulas" `Sat (sat fs);
+  Alcotest.check res "typed Bool again" `Unsat
+    (sat ~gamma:[ ("#cb", Type.BooleanType) ] fs)
+
 let tests : unit Alcotest.test_case list =
   [
     ("builtin table", `Quick, test_table);
@@ -780,4 +795,5 @@ let tests : unit Alcotest.test_case list =
     ("SERVPIPS: sat answers read no model (backslash string)", `Quick, test_no_model);
     ("SERVPIPS: str.len bound and js.num2str length facts", `Quick, test_smt_string_facts);
     ("SERVPIPS: numeric comparisons encode as Booleans", `Quick, test_smt_comparison_kind);
+    ("SERVPIPS: the sat cache is keyed by the types", `Quick, test_sat_cache_types);
   ]
