@@ -929,16 +929,26 @@ let member_access (ms : mstate) (info : info) (i : int) (al : string) (k : strin
     [ (ms.heap, [ loc; prop; nono ], [], []) ]
   in
   let c = info.classes.(i) in
+  let index_beyond_length () =
+    (* symbolic-length array: no element can exist at [k] on this path *)
+    match (c.cls, array_len_kind c.members) with
+    | Arr_cls, Sym ->
+        let l = Expr.LVar (len_var info c) in
+        let idx = Expr.Lit (Num (float_of_string k)) in
+        not (sat ms [ Expr.BinOp (idx, FLessThan, l) ])
+    | _ -> false
+  in
   match class_member c k with
   | None -> none ()
+  | Some _ when index_beyond_length () -> none ()
   | Some (_, optional) -> (
       let child = get_child ~parent_aloc:al info k in
       let facts, types, restricted = child_facts ms info i k child in
       let v = Expr.LVar child.lvar in
-      let fork_on f_in f_out =
+      let fork_on ?(known_in = false) f_in f_out =
         (* [f_in]: member present (cell created); [f_out]: absent (none) *)
         let gamma = gamma_with ms types in
-        let ok_in = sat ms ~gamma (f_in :: facts) in
+        let ok_in = known_in || sat ms ~gamma (f_in :: facts) in
         let ok_out = sat ms ~gamma (f_out :: facts) in
         let copy h = if ok_in && ok_out then SHeap.copy h else h in
         (if ok_in then
@@ -959,7 +969,11 @@ let member_access (ms : mstate) (info : info) (i : int) (al : string) (k : strin
       | Arr_cls when array_len_kind c.members = Sym ->
           let l = Expr.LVar (len_var info c) in
           let idx = Expr.Lit (Num (float_of_string k)) in
-          fork_on (Expr.BinOp (idx, FLessThan, l)) (Expr.BinOp (l, FLessThanEqual, idx))
+          (* [idx < len] was found satisfiable above; the child's facts are
+             only its fresh mask unless a class restriction applies *)
+          fork_on ~known_in:(not restricted)
+            (Expr.BinOp (idx, FLessThan, l))
+            (Expr.BinOp (l, FLessThanEqual, idx))
       | _ ->
           if restricted && not (sat ms ~gamma:(gamma_with ms types) facts) then []
           else (
