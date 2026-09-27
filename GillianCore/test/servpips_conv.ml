@@ -311,10 +311,58 @@ let test_reduction_typing () =
       Alcotest.(check bool) "no type inferred for the argument" true (Type_env.get g' "#a" = None)
   | None -> Alcotest.fail "reverse typing failed"
 
+(* ------------------------------------------------------------------ *)
+(* ite.str / ite.num and string lengths of builtin applications        *)
+(* ------------------------------------------------------------------ *)
+
+let test_ite_and_lengths () =
+  with_env @@ fun () ->
+  let gamma = Type_env.init () in
+  Type_env.update gamma "#c" Type.BooleanType;
+  Type_env.update gamma "#s" Type.StringType;
+  Type_env.update gamma "#x" Type.NumberType;
+  let red e = Reduction.reduce_lexpr ~gamma e in
+  let same name a b = Alcotest.(check bool) name true (Expr.equal (red a) b) in
+  let ite_s c a b = app "ite.str" [ c; a; b ] in
+  same "ite.str literal condition" (ite_s (Lit (Bool true)) (lv "#s") (str "a")) (lv "#s");
+  same "ite.num equal branches" (app "ite.num" [ lv "#c"; num 1.; num 1. ]) (num 1.);
+  same "ite.str on literals" (ite_s (Lit (Bool false)) (str "t") (str "f")) (str "f");
+  let t = Alcotest.testable (Fmt.option Type.pp) (Option.equal Type.equal) in
+  Alcotest.check t "ite.str : Str" (Some Type.StringType)
+    (fst (Typing.type_lexpr gamma (ite_s (lv "#c") (str "true") (str "false"))));
+  Alcotest.check t "ite.num : Num" (Some Type.NumberType)
+    (fst (Typing.type_lexpr gamma (app "ite.num" [ lv "#c"; num 1.; lv "#x" ])));
+  let j = ite_s (lv "#c") (str "true") (str "false") in
+  Alcotest.(check bool) "ite.str: only true/false" true
+    (sat [ Expr.BinOp (UnOp (TypeOf, lv "#c"), Equal, Lit (Type BooleanType)); eq j (str "x") ] = `Unsat);
+  Alcotest.(check bool) "ite.str: true when c" true
+    (sat [ eq (lv "#c") (Lit (Bool true)); eq j (str "true") ] = `Sat);
+  Alcotest.(check bool) "ite.str: not false when c" true
+    (sat [ eq (lv "#c") (Lit (Bool true)); eq j (str "false") ] = `Unsat);
+  (* string length / character of builtin applications: unknown in
+     Reduction (no exception), str.len of the term in SMT *)
+  Utils.Config.servpips_semantics := true;
+  let u = app "decodeURIComponent" [ app "str.replace_all" [ lv "#s"; str "+"; str " " ] ] in
+  let ln = Expr.UnOp (StrLen, u) in
+  same "length of a UF string kept" ln ln;
+  let n2s = Expr.UnOp (StrLen, UnOp (ToStringOp, lv "#x")) in
+  same "length of num_to_string kept" n2s n2s;
+  same "length of js.tostring kept" (Expr.UnOp (StrLen, app "js.tostring" [ lv "#v" ]))
+    (Expr.UnOp (StrLen, app "js.tostring" [ lv "#v" ]));
+  let nth = Expr.BinOp (UnOp (ToStringOp, lv "#x"), StrNth, num 0.) in
+  Alcotest.(check bool) "character of num_to_string: no exception" true
+    (match red nth with
+    | _ -> true
+    | exception _ -> false);
+  Alcotest.(check bool) "SMT: length of num_to_string 12 is 2" true
+    (sat [ eq (lv "#x") (num 12.); Expr.BinOp (UnOp (StrLen, UnOp (ToStringOp, lv "#x")), Equal, num 3.) ]
+    = `Unsat)
+
 let tests : unit Alcotest.test_case list =
   [
     ("defined builtins in the table", `Quick, test_table);
     ("concrete conversions vs Node", `Quick, test_eval_vs_node);
     ("SMT definitions vs Node", `Quick, test_smt_vs_node);
     ("reduction and typing", `Quick, test_reduction_typing);
+    ("ite.str / ite.num, lengths of builtin strings", `Quick, test_ite_and_lengths);
   ]

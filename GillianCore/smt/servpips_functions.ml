@@ -48,6 +48,10 @@ let fixed : (string * spec) list =
     def "js.tostring" 1 s_;
     def "js.toboolean" 1 b_;
     def "js.looseeq" 2 b_;
+    (* value-level conditional (the __servpips_fn "ite" of non-Boolean
+       branches), monomorphic: SMT (ite c a b) *)
+    ("ite.str", { args = some [ b_; s_; s_ ]; ret = s_; smt = `Native "ite" });
+    ("ite.num", { args = some [ b_; n_; n_ ]; ret = n_; smt = `Native "ite" });
   ]
 
 let table : (string, spec) Hashtbl.t =
@@ -368,6 +372,9 @@ let eval_concrete name (args : Literal.t list) : Literal.t option =
         num_of_z (Z.of_string s)
       else Some (Num (-1.))
   | "str.in_re.numlit", [ String s ] -> Some (Bool (numlit_matches s))
+  | "ite.str", [ Bool c; (String _ as a); (String _ as b) ]
+  | "ite.num", [ Bool c; (Num _ as a); (Num _ as b) ] ->
+      Some (if c then a else b)
   | "js.tostring", [ v ] -> Option.map (fun s -> String s) (js_tostring v)
   | "js.toboolean", [ v ] -> Option.map (fun b -> Bool b) (js_toboolean v)
   | "js.looseeq", [ a; b ] -> Option.map (fun b -> Bool b) (js_looseeq a b)

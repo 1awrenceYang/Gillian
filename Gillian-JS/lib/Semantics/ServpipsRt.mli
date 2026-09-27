@@ -90,7 +90,11 @@
       (section 4.5); names are checked against {!builtin_names}. Native GIL
       operations ([and or not = => typeof toNumber toString], and [ite] on
       booleans) are built directly; the others become [FuncApp] (their SMT
-      encoding is WP1's). The defined conversions [js.tostring],
+      encoding is WP1's). [ite(c, a, b)] with non-Boolean branches (the
+      models' value-level conditional): a literal [c] selects a branch; two
+      string / two finite-number branches give the builtins [ite.str] /
+      [ite.num] (SMT [ite], no fork); other branch types fork on [c]; [c]
+      must be a GIL boolean (otherwise [unsupported]). The defined conversions [js.tostring],
       [js.toboolean], [js.looseeq] (decision D-R2-2) are evaluated on
       literal arguments and simplified for values of known type, in both
       modes (under concrete execution a result that is not a literal is

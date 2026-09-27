@@ -796,7 +796,7 @@ module Make (E : X.ENV) = struct
   (* servpips_fn("<name>", a1, ...)                                      *)
   (* ------------------------------------------------------------------ *)
 
-  let fn (st : st) (args : vt list) : outcome list =
+  let rec fn (st : st) (args : vt list) : outcome list =
     match args with
     | [] -> fail_err "missing builtin name"
     | name :: fargs -> (
@@ -832,9 +832,10 @@ module Make (E : X.ENV) = struct
           | Some { smt = `Defined; _ } -> true
           | _ -> false
         in
-        match native with
-        | Some e -> [ X.Return (st, guard (fun () -> S.eval_expr st e)) ]
-        | None when defined ->
+        match (native, name, fargs) with
+        | Some e, _, _ -> [ X.Return (st, guard (fun () -> S.eval_expr st e)) ]
+        | None, "ite", [ c; a; b ] -> ite st c a b
+        | None, _, _ when defined ->
             (* evaluated on literal arguments (both modes); the conversion
                of a value of known type is simplified *)
             let e = Expr.FuncApp (name, es) in
@@ -843,11 +844,56 @@ module Make (E : X.ENV) = struct
               fail_uns "builtin %s not evaluable on %s" name
                 (Fmt.to_to_string (Fmt.list ~sep:Fmt.comma V.pp) fargs)
             else [ X.Return (st, v) ]
-        | None ->
+        | None, _, _ ->
             let e = Expr.FuncApp (name, es) in
             if not E.symbolic then
               fail_uns "builtin %s under concrete execution" name
             else [ X.Return (st, v_of_expr e) ])
+
+  (* __servpips_fn("ite", c, a, b) with non-Boolean branches: GIL has no
+     conditional expression. A literal condition selects a branch; two
+     string / two (finite) number branches give ite.str / ite.num (SMT ite,
+     no fork); otherwise the path forks on the condition. The condition
+     must be a GIL Boolean (a non-Boolean condition would be encoded with a
+     type guard, i.e. a stronger path condition). *)
+  and ite (st : st) (c : vt) (a : vt) (b : vt) : outcome list =
+    let ec = e_of c and ea = e_of a and eb = e_of b in
+    match V.to_literal c with
+    | Some (Bool true) -> [ X.Return (st, a) ]
+    | Some (Bool false) -> [ X.Return (st, b) ]
+    | Some _ -> fail_err "ite: condition is not a boolean: %s" (pp_v c)
+    | None ->
+        let is_bool =
+          (match guard (fun () -> S.get_type st c) with
+          | Some BooleanType -> true
+          | _ -> false)
+          || Expr.is_boolean_expr ec
+        in
+        if not is_bool then
+          fail_uns "ite: condition is not known to be a GIL boolean: %s" (pp_v c);
+        if not E.symbolic then fail_uns "ite: symbolic condition under concrete execution";
+        let ty v = guard (fun () -> S.get_type st v) in
+        let finite_or_symbolic e =
+          match e with
+          | Expr.Lit (Num f) -> Float.is_finite f
+          | _ -> true
+        in
+        let app f = [ X.Return (st, guard (fun () -> S.eval_expr st (Expr.FuncApp (f, [ ec; ea; eb ])))) ] in
+        match (ty a, ty b) with
+        | Some StringType, Some StringType -> app "ite.str"
+        | Some NumberType, Some NumberType
+          when finite_or_symbolic ea && finite_or_symbolic eb ->
+            app "ite.num"
+        | _ ->
+            let not_c = Expr.UnOp (Not, ec) in
+            let br f v =
+              if sat st [ f ] then
+                match assume_all st [ f ] with
+                | Some st -> [ X.Return (st, v) ]
+                | None -> []
+              else []
+            in
+            br ec a @ br not_c b
 
   (* ------------------------------------------------------------------ *)
   (* servpips_define / servpips_absent / servpips_mark                   *)

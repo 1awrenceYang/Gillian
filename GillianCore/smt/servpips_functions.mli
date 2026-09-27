@@ -47,7 +47,15 @@
     js.tostring(v)           Any -> Str           defined (decision D-R2-2)
     js.toboolean(v)          Any -> Bool          defined (decision D-R2-2)
     js.looseeq(a,b)          Any,Any -> Bool      defined (decision D-R2-2)
+    ite.str(c,a,b)           Bool,Str,Str -> Str  native (ite c a b)
+    ite.num(c,a,b)           Bool,Num,Num -> Num  native (ite c a b)
     v}
+
+    [ite.str] / [ite.num] are the value-level conditional of
+    [__servpips_fn("ite", c, a, b)] when both branches are strings /
+    numbers (GIL has no conditional expression; Boolean branches use
+    [and]/[or]). On a literal condition, or equal branches, they are
+    reduced to a branch.
 
     {b Defined builtins} (decision D-R2-2: conversions of a value whose JS
     type is a union, without forking per type). Their arguments may have
