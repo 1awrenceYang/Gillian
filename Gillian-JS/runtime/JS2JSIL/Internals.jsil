@@ -21,9 +21,21 @@ proc i__toLength (v) {
 
 (* *** ISPRIMITIVE *** *)
 
+(*
+ * SERVPIPS (decision D-R2-2): with --servpips, a symbolic value whose type
+ * is a union forks only primitive / object (/ non-JS value) instead of once
+ * per type: extern servpips_conv returns the result, or none (inactive, or
+ * a literal / a value of known type: the procedure continues as upstream).
+ * The same hook is used by i__toBoolean, i__toString, i__abstractEquality.
+ *)
 proc i__isPrimitive (v) {
 
-	     goto [(v = undefined)] rt c1;
+	     sp := extern servpips_conv ("isPrimitive", v);
+	     goto [sp = none] c0 spr;
+	spr: ret := sp;
+	     return;
+
+	c0:  goto [(v = undefined)] rt c1;
 	c1:  goto [(v = null)] rt c2;
 	c2:	 tv := typeOf v;
 	     goto [(tv = Bool)] rt c3;
@@ -98,8 +110,9 @@ proc o__getOwnProperty (l, prop) {
           goto [rf = empty] und res;
 
     res:  rm := metadata(rf);
-          rsc := [rm, "@scope"];
-          rfn := [rm, "@call"];
+          sp_ct := "i__callTarget" (rf);
+          rsc := l-nth (sp_ct, 1);
+          rfn := l-nth (sp_ct, 0);
           rr := rfn (rsc, undefined, l, prop) with elab;
           x := hasField(l, prop);
           goto [x] hp und;
@@ -191,8 +204,9 @@ proc get (l, prop) {
 
 	acc:	goto [ret = undefined] rlab get;		(* Is the getter defined?               *)
 	get:	m := metadata(ret);
-			xsc := [m, "@scope"];				(* Get the scope of the getter          *)
-			fun := [m, "@call"];					(* Get the name of the getter           *)
+			sp_ct := "i__callTarget" (ret);
+			xsc := l-nth (sp_ct, 1);
+			fun := l-nth (sp_ct, 0);
 			ret := fun (xsc, l) with elab;			(* Call the getter, errors could happen *)
 			goto [ret = empty] undef rlab;
 	undef:	ret := undefined;
@@ -262,8 +276,9 @@ proc put (l, prop, value, thrw) {
 
     ad:		s := l-nth (ret, 2);
     		m := metadata(s);
-    		xsc := [m, "@scope"];
-    		fun := [m, "@call"];
+    		sp_ct := "i__callTarget" (s);
+    		xsc := l-nth (sp_ct, 1);
+    		fun := l-nth (sp_ct, 0);
     		ret := fun (xsc, l, value) with elab;
     		goto remp;
 
@@ -365,8 +380,9 @@ proc defaultValue (l, hint) {
            goto [c] call next;
 
     call:  m := metadata(ret);
-    	   xsc := [m, "@scope"];
-           fun := [m, "@call"];
+    	   sp_ct := "i__callTarget" (ret);
+    	   xsc := l-nth (sp_ct, 1);
+    	   fun := l-nth (sp_ct, 0);
            ret := fun (xsc, l) with elab;
 		   goto [ret = empty] undef ispr;
 	undef: ret := undefined;
@@ -814,8 +830,9 @@ proc i__getValue (v) {
 
 	acc:	goto [ret = undefined] rlab get;	(* Is the getter defined? *)
 	get:	m := metadata(ret);
-			xsc := [m, "@scope"];	(* Get the scope of the getter *)
-			fun := [m, "@call"];	(* Get the name of the getter *)
+			sp_ct := "i__callTarget" (ret);
+			xsc := l-nth (sp_ct, 1);
+			fun := l-nth (sp_ct, 0);
 			ret := fun (xsc, rbase) with elab;	(* Call the getter, errors could happen *)
 			goto [ret = empty] undef rlab;
 	undef:	ret := undefined;
@@ -892,8 +909,9 @@ proc i__putValue (v, w) {
 
 	ad:	    s := l-nth (ret, 2);
             m := metadata(s);
-            xsc := [m, "@scope"];
-            fun := [m, "@call"];
+            sp_ct := "i__callTarget" (s);
+            xsc := l-nth (sp_ct, 1);
+            fun := l-nth (sp_ct, 0);
             ret := fun (xsc, rbase, w) with elab;
             goto dflt;
 
@@ -917,6 +935,11 @@ proc i__putValue (v, w) {
 (* *** TOBOOLEAN *** *)
 
 proc i__toBoolean (v) {
+			sp := extern servpips_conv ("toBoolean", v);
+			goto [sp = none] iu spr;
+	spr:	ret := sp;
+			goto rlab;
+
 	iu:		goto [v = undefined] undef in;
 	undef:	ret := false;
 			goto rlab;
@@ -1035,6 +1058,10 @@ proc i__toUint16 (v) {
 
 proc i__toString (v) {
 			v := v;
+			sp := extern servpips_conv ("toString", v);
+			goto [sp = none] iu spr;
+	spr:	ret := sp;
+			goto rlab;
 
 	iu:		 goto [v = undefined] undef in;
 	undef: ret := "undefined";
@@ -1138,6 +1165,63 @@ proc i__isCallable (l) {
 	obj:	m := metadata(l);
 			ret := hasField(m, "@call");
 	rlab: return
+};
+
+(* ********************************************************************* *)
+(* SERVPIPS: calls of function objects by the runtime (bound functions)  *)
+(* ********************************************************************* *)
+
+(*
+ * The runtime procedures that call a JS function object f themselves
+ * (Array.prototype.map/forEach/..., sort comparators, Function.prototype.
+ * call/apply, getters/setters, toString/valueOf in DefaultValue, the
+ * resolver hook) take the procedure and scope to call from
+ * i__callTarget(f) = {{ procedure, scope }} and call
+ * procedure(scope, this, arguments...). For an ordinary function these are
+ * its @call and @scope. A bound function (Function.prototype.bind) has no
+ * @scope: with --servpips (extern servpips_enabled) i__callTarget returns
+ * {{ "i__boundCall", f }}, and i__boundCall calls f with the ES5 [[Call]]
+ * of bound functions (15.3.4.5.1: bound this, bound arguments first,
+ * recursively for bound targets); without --servpips the metadata is only
+ * read as upstream (the @scope lookup of a bound function fails as
+ * upstream).
+ *)
+proc i__callTarget (f) {
+          m := metadata(f);
+          en := extern servpips_enabled ();
+          goto [en] sp norm;
+  sp:     bnd := hasField(m, "@boundThis");
+          goto [bnd] bound norm;
+  bound:  ret := {{ "i__boundCall", f }};
+          return;
+  norm:   fun := [m, "@call"];
+          scp := [m, "@scope"];
+          ret := {{ fun, scp }};
+          return
+};
+
+proc i__boundCall (xsc, vthis) {
+          arguments := args;
+          rest := cdr (cdr arguments);
+          ret := "i__callFunction" (xsc, vthis, rest) with elab;
+  rlab:   return;
+  elab:   throw
+};
+
+proc i__callFunction (f, t, argl) {
+          m := metadata(f);
+          bnd := hasField(m, "@boundThis");
+          goto [bnd] bound plain;
+  bound:  tf := [m, "@targetFunction"];
+          bt := [m, "@boundThis"];
+          ba := [m, "@boundArguments"];
+          ret := "i__callFunction" (tf, bt, l+ (ba, argl)) with elab;
+          goto rlab;
+  plain:  fun := [m, "@call"];
+          scp := [m, "@scope"];
+          ret := apply (l+ ({{ fun, scp, t }}, argl)) with elab;
+  rlab:   return;
+  elab:   throw
 };
 
 (* ********** *)
@@ -1295,7 +1379,12 @@ proc i__typeOf (v) {
 (* **************** *)
 
 proc i__abstractEquality (v1, v2) {
-			tv1 := typeOf v1;
+			sp := extern servpips_conv ("looseEq", v1, v2);
+			goto [sp = none] up spr;
+	spr:	ret := sp;
+			goto rlab;
+
+	up:		tv1 := typeOf v1;
 			tv2 := typeOf v2;
 
 			goto [(tv1 = tv2) or (tv1 = tv2) or (tv2 = tv1)] same diff;

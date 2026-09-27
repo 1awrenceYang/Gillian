@@ -103,8 +103,9 @@ proc FP_call (xsc, vthis, this_arg) {
   res_a:  PHI(arguments: opt_args, emp_args);
 
           m := metadata(func);
-          body := [m, "@call"];
-          xscope := [m, "@scope"];
+          sp_ct := "i__callTarget" (func);
+          xscope := l-nth (sp_ct, 1);
+          body := l-nth (sp_ct, 0);
           params := l+ ({{ body, xscope, this_arg }}, arguments);
           (* Actual function call *)
           ret_val := apply (params) with elab;
@@ -156,8 +157,9 @@ proc FP_apply (xsc, vthis, this_arg, arg_array) {
 
 	call:	xthis := this_arg;
 			m := metadata(vthis);
-			body   := [m, "@call"];
-			xscope := [m, "@scope"];
+			sp_ct := "i__callTarget" (vthis);
+			xscope := l-nth (sp_ct, 1);
+			body := l-nth (sp_ct, 0);
 
 			params := l+ ({{ body, xscope, xthis }}, params);
 

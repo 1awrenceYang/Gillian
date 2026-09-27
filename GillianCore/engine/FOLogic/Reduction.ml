@@ -1072,7 +1072,35 @@ and reduce_lexpr_loop
           match Smt.Servpips_functions.eval_concrete n lits with
           | Some l -> Lit l
           | None -> FuncApp (n, les)
-        else FuncApp (n, les))
+        else
+          (* SERVPIPS (decision D-R2-2): a conversion of a value whose type
+             is known is the conversion of that type *)
+          let type_of e = fst (Typing.type_lexpr gamma e) in
+          match (n, les) with
+          | "js.tostring", [ e ] -> (
+              match type_of e with
+              | Some StringType -> e
+              | Some UndefinedType -> Lit (String "undefined")
+              | Some NullType -> Lit (String "null")
+              | _ -> FuncApp (n, les))
+          | "js.toboolean", [ e ] -> (
+              match type_of e with
+              | Some BooleanType -> e
+              | Some (UndefinedType | NullType) -> Expr.false_
+              | Some ObjectType -> Expr.true_
+              | Some StringType -> UnOp (Not, BinOp (e, Equal, Lit (String "")))
+              | _ -> FuncApp (n, les))
+          | ("ite.str" | "ite.num"), [ Lit (Bool c); a; b ] -> if c then a else b
+          | ("ite.str" | "ite.num"), [ _; a; b ] when Expr.equal a b -> a
+          | "js.looseeq", [ _; _ ]
+            when List.exists
+                   (function
+                     | Expr.Lit (Num f) -> Float.is_nan f
+                     | _ -> false)
+                   les ->
+              (* NaN is loosely equal to nothing *)
+              Expr.false_
+          | _ -> FuncApp (n, les))
     (* -------------------------
                  Cases
        ------------------------- *)

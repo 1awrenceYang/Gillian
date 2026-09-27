@@ -992,6 +992,11 @@ module Servpips_enc = struct
     | BooleanType -> t_bool
     | t -> exceptf "SERVPIPS builtin: unsupported sort %s" (Type.str t)
 
+  (* argument sort: [None] (any type) is an Extended_GIL_Literal *)
+  let arg_sort = function
+    | Some t -> sort_of t
+    | None -> t_gil_ext_literal
+
   (* one declaration per uninterpreted builtin, shared by every use *)
   let uf_defs : (string, definition) Hashtbl.t = Hashtbl.create 16
 
@@ -1002,7 +1007,7 @@ module Servpips_enc = struct
         let d =
           make_definition
             [
-              declare_fun name (List.map sort_of spec.args) (sort_of spec.ret);
+              declare_fun name (List.map arg_sort spec.args) (sort_of spec.ret);
             ]
         in
         Hashtbl.replace uf_defs name d;
@@ -1041,8 +1046,9 @@ module Servpips_enc = struct
   let zero = rk 0.
   let is_int_real r = eq (int_to_real (real_to_int r)) r
 
-  (* ToStringOp: the check's numToStr shape *)
-  let num_to_str r =
+  (* ToStringOp: the check's numToStr shape. [num_to_str_body] does not
+     require the declaration of js.num2str (for use in definitions). *)
+  let num_to_str_body r =
     let big = rk 1e21 in
     let isint = is_int_real r in
     let nonneg = bool_ands [ isint; num_leq zero r; num_lt r big ] in
@@ -1052,20 +1058,30 @@ module Servpips_enc = struct
       (ite neg
          (app_ "str.++"
             [ string_k "-"; app_ "str.from_int" [ real_to_int (num_neg r) ] ])
-         (uf "js.num2str" [ r ]))
+         (app_ "js.num2str" [ r ]))
+
+  let num_to_str r =
+    ignore (uf "js.num2str" [ r ]);
+    num_to_str_body r
 
   (* ToNumberOp (finite branch of ToNumber): exact for short digit strings
      and whitespace-only strings, js.tonumber.num otherwise *)
-  let str_to_num s =
-    let digits =
-      bool_and
-        (app_ "str.in_re" [ s; Lazy.force digits_plus ])
-        (num_lt (app_ "str.len" [ s ]) (int_k 16))
-    in
-    let ws_only = app_ "str.in_re" [ s; Lazy.force ws_star ] in
-    ite digits
+  (* s is 1..15 decimal digits / only white space (or empty) *)
+  let digits_c s =
+    bool_and
+      (app_ "str.in_re" [ s; Lazy.force digits_plus ])
+      (num_lt (app_ "str.len" [ s ]) (int_k 16))
+
+  let ws_only_c s = app_ "str.in_re" [ s; Lazy.force ws_star ]
+
+  let str_to_num_body s =
+    ite (digits_c s)
       (int_to_real (app_ "str.to_int" [ s ]))
-      (ite ws_only zero (uf "js.tonumber.num" [ s ]))
+      (ite (ws_only_c s) zero (app_ "js.tonumber.num" [ s ]))
+
+  let str_to_num s =
+    ignore (uf "js.tonumber.num" [ s ]);
+    str_to_num_body s
 
   let floor x = int_to_real (real_to_int x)
   let ceil x = num_neg (floor (num_neg x))
@@ -1101,6 +1117,168 @@ module Servpips_enc = struct
   (* JS remainder (sign of the dividend), for b <> 0 *)
   let fmod a b = num_sub a (num_mul b (trunc (app_ "/" [ a; b ])))
 
+  (* ---- defined builtins (decision D-R2-2) ----
+
+     Each is a [define-fun] over Extended_GIL_Literal arguments (an argument
+     of any type is extend-wrapped, which never adds a guard), an ite over
+     the constructors of the argument's value. The last case is an
+     uninterpreted [<name>.other] (unspecified result). *)
+
+  let other_def name nargs ret =
+    make_definition ~depends_on:[ def_gil_ext_literal ]
+      [
+        declare_fun (name ^ ".other")
+          (List.init nargs (fun _ -> t_gil_ext_literal))
+          ret;
+      ]
+
+  (* [x] is a JS value built with the GIL literal constructor [c] *)
+  let sing x = Ext_lit_operations.Gil_sing_elem.recognize x
+  let elem x = Ext_lit_operations.Gil_sing_elem.access x
+
+  let is_c (module C : Variant.S) x =
+    bool_and (sing x) (C.recognize (elem x))
+
+  module LO = Lit_operations
+
+  let is_str = is_c (module LO.String)
+  let is_num = is_c (module LO.Num)
+  let is_bool = is_c (module LO.Bool)
+  let is_null = is_c (module LO.Null)
+  let is_undef = is_c (module LO.Undefined)
+  let is_loc = is_c (module LO.Loc)
+  let str_v x = LO.String.access (elem x)
+  let num_v x = LO.Num.access (elem x)
+  let bool_v x = LO.Bool.access (elem x)
+  let loc_v x = LO.Loc.access (elem x)
+  let nullish x = bool_or (is_undef x) (is_null x)
+
+  (* a boolean, number, string or object (not null / undefined) *)
+  let is_jsval x = bool_ors [ is_bool x; is_num x; is_str x; is_loc x ]
+
+  (* [cases [(c1, r1); ...] d] = ite c1 r1 (ite ... d) *)
+  let cases cs d = List.fold_right (fun (c, r) acc -> ite c r acc) cs d
+
+  (* ToNumber of the string [s] is finite and equal to the real [n]: exact
+     for digit strings (their integer) and white-space-only strings (0);
+     otherwise the finite case of design section 4.4 (str.in_re.numlit, not
+     js.tonumber.ispinf / isninf) with the value js.tonumber.num *)
+  let num_eq_str n s =
+    ite (digits_c s)
+      (eq (int_to_real (app_ "str.to_int" [ s ])) n)
+      (ite (ws_only_c s) (eq n zero)
+         (bool_ands
+            [
+              app_ "str.in_re" [ s; atom numlit_name ];
+              bool_not (app_ "js.tonumber.ispinf" [ s ]);
+              bool_not (app_ "js.tonumber.isninf" [ s ]);
+              eq (app_ "js.tonumber.num" [ s ]) n;
+            ]))
+
+  let uf_def_of name =
+    match Servpips_functions.lookup name with
+    | Some spec -> uf_def name spec
+    | None -> exceptf "SERVPIPS: unknown builtin %s" name
+
+  let x_ = atom "x"
+  let y_ = atom "y"
+
+  let defined_defs : (string, definition) Hashtbl.t Lazy.t =
+    lazy
+      (let t = Hashtbl.create 4 in
+       let ext = t_gil_ext_literal in
+       let tostring =
+         let other = app_ "js.tostring.other" [ x_ ] in
+         make_definition
+           ~depends_on:
+             [
+               def_gil_ext_literal;
+               uf_def_of "js.num2str";
+               other_def "js.tostring" 1 t_string;
+             ]
+           [
+             define_fun "js.tostring" [ ("x", ext) ] t_string
+               (ite (is_str x_) (str_v x_)
+                  (ite (is_num x_)
+                     (num_to_str_body (num_v x_))
+                     (ite (is_bool x_)
+                        (ite (bool_v x_) (string_k "true") (string_k "false"))
+                        (ite (is_null x_) (string_k "null")
+                           (ite (is_undef x_) (string_k "undefined") other)))));
+           ]
+       in
+       let toboolean =
+         let other = app_ "js.toboolean.other" [ x_ ] in
+         make_definition
+           ~depends_on:
+             [ def_gil_ext_literal; other_def "js.toboolean" 1 t_bool ]
+           [
+             define_fun "js.toboolean" [ ("x", ext) ] t_bool
+               (ite (is_bool x_) (bool_v x_)
+                  (ite (is_num x_)
+                     (bool_not (eq (num_v x_) zero))
+                     (ite (is_str x_)
+                        (bool_not (eq (str_v x_) (string_k "")))
+                        (ite (nullish x_) (bool_k false)
+                           (ite (is_loc x_) (bool_k true) other)))));
+           ]
+       in
+       let looseeq =
+         let other = app_ "js.looseeq.other" [ x_; y_ ] in
+         let b01 x = ite (bool_v x) (rk 1.) zero in
+         (* the value of [y] (not a boolean) equals the number [n] *)
+         let num_eq n y =
+           bool_or
+             (bool_and (is_num y) (eq (num_v y) n))
+             (bool_and (is_str y) (num_eq_str n (str_v y)))
+         in
+         make_definition
+           ~depends_on:
+             [
+               def_gil_ext_literal;
+               Lazy.force numlit_def;
+               uf_def_of "js.tonumber.ispinf";
+               uf_def_of "js.tonumber.isninf";
+               uf_def_of "js.tonumber.num";
+               other_def "js.looseeq" 2 t_bool;
+             ]
+           [
+             define_fun "js.looseeq"
+               [ ("x", ext); ("y", ext) ]
+               t_bool
+               (cases
+                  [
+                    (bool_and (nullish x_) (nullish y_), bool_k true);
+                    (bool_and (is_bool x_) (is_bool y_), eq (bool_v x_) (bool_v y_));
+                    (bool_and (is_num x_) (is_num y_), eq (num_v x_) (num_v y_));
+                    (bool_and (is_str x_) (is_str y_), eq (str_v x_) (str_v y_));
+                    (bool_and (is_loc x_) (is_loc y_), eq (loc_v x_) (loc_v y_));
+                    (bool_and (nullish x_) (is_jsval y_), bool_k false);
+                    (bool_and (nullish y_) (is_jsval x_), bool_k false);
+                    ( bool_and (is_num x_) (is_str y_),
+                      num_eq_str (num_v x_) (str_v y_) );
+                    ( bool_and (is_str x_) (is_num y_),
+                      num_eq_str (num_v y_) (str_v x_) );
+                    ( bool_and (is_bool x_) (bool_or (is_num y_) (is_str y_)),
+                      num_eq (b01 x_) y_ );
+                    ( bool_and (is_bool y_) (bool_or (is_num x_) (is_str x_)),
+                      num_eq (b01 y_) x_ );
+                  ]
+                  other);
+           ]
+       in
+       Hashtbl.replace t "js.tostring" tostring;
+       Hashtbl.replace t "js.toboolean" toboolean;
+       Hashtbl.replace t "js.looseeq" looseeq;
+       t)
+
+  let defined name xs =
+    match Hashtbl.find_opt (Lazy.force defined_defs) name with
+    | Some d ->
+        require_definition d;
+        app_ name xs
+    | None -> exceptf "SERVPIPS: builtin %s has no definition" name
+
   let builtin name (args : Encoding.t list) : Encoding.t =
     let open Encoding in
     let spec =
@@ -1111,10 +1289,16 @@ module Servpips_enc = struct
     if List.length args <> List.length spec.args then
       exceptf "SERVPIPS builtin %s: %d arguments given, %d expected" name
         (List.length args) (List.length spec.args);
-    let>-- args = List.map2 get_native_of_type spec.args args in
+    let native_or_any t a =
+      match t with
+      | Some t -> get_native_of_type t a
+      | None -> extend_wrap a
+    in
+    let>-- args = List.map2 native_or_any spec.args args in
     let xs = List.map (fun (a : Encoding.t) -> a.expr) args in
     match (spec.smt, xs) with
     | `Uf, _ -> uf name xs >- spec.ret
+    | `Defined, _ -> defined name xs >- spec.ret
     | `Native "str.indexof", [ s; p; i ] ->
         int_to_real (app_ "str.indexof" [ s; p; real_to_int i ]) >- NumberType
     | `Native "str.substr", [ s; i; n ] ->

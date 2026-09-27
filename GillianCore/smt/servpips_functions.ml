@@ -3,16 +3,22 @@
 open Gil_syntax
 module Sexp = Sexplib.Sexp
 
-type smt = [ `Native of string | `Uf ]
-type spec = { args : Type.t list; ret : Type.t; smt : smt }
+type smt = [ `Native of string | `Uf | `Defined ]
+type spec = { args : Type.t option list; ret : Type.t; smt : smt }
 
 let s_ = Type.StringType
 let n_ = Type.NumberType
 let b_ = Type.BooleanType
 
 let fixed : (string * spec) list =
-  let nat name args ret = (name, { args; ret; smt = `Native name }) in
-  let uf name args ret = (name, { args; ret; smt = `Uf }) in
+  let some = List.map Option.some in
+  let nat name args ret = (name, { args = some args; ret; smt = `Native name }) in
+  let uf name args ret = (name, { args = some args; ret; smt = `Uf }) in
+  (* decision D-R2-2: conversions of values of any (JS) type, defined over
+     the type constructors of GIL values *)
+  let def name arity ret =
+    (name, { args = List.init arity (fun _ -> None); ret; smt = `Defined })
+  in
   [
     nat "str.replace_all" [ s_; s_; s_ ] s_;
     nat "str.contains" [ s_; s_ ] b_;
@@ -39,6 +45,13 @@ let fixed : (string * spec) list =
     uf "JSON.quote" [ s_ ] s_;
     uf "js.num2str" [ n_ ] s_;
     uf "js.toUint32" [ n_ ] n_;
+    def "js.tostring" 1 s_;
+    def "js.toboolean" 1 b_;
+    def "js.looseeq" 2 b_;
+    (* value-level conditional (the __servpips_fn "ite" of non-Boolean
+       branches), monomorphic: SMT (ite c a b) *)
+    ("ite.str", { args = some [ b_; s_; s_ ]; ret = s_; smt = `Native "ite" });
+    ("ite.num", { args = some [ b_; n_; n_ ]; ret = n_; smt = `Native "ite" });
   ]
 
 let table : (string, spec) Hashtbl.t =
@@ -66,7 +79,8 @@ let lookup name =
   | Some s -> Some s
   | None -> (
       match path_join_arity name with
-      | Some n -> Some { args = List.init n (fun _ -> s_); ret = s_; smt = `Uf }
+      | Some n ->
+          Some { args = List.init n (fun _ -> Some s_); ret = s_; smt = `Uf }
       | None -> None)
 
 let is_builtin name = Option.is_some (lookup name)
@@ -80,7 +94,7 @@ let all_names () =
   List.map fst fixed @ List.init 17 (fun n -> path_join_prefix ^ string_of_int n)
 
 let func_of name (spec : spec) : Func.t =
-  let params = List.mapi (fun i t -> ("x" ^ string_of_int i, Some t)) spec.args in
+  let params = List.mapi (fun i t -> ("x" ^ string_of_int i, t)) spec.args in
   {
     func_name = name;
     func_source_path = None;
@@ -281,6 +295,45 @@ let is_suffix p s =
   let n = String.length s and m = String.length p in
   m <= n && String.sub s (n - m) m = p
 
+(* Decision D-R2-2: the conversions of values of any JS type, on literals
+   (ES2023 ToString, ToBoolean and IsLooselyEqual). [None] where the
+   operation would call a JS method (ToPrimitive of an object) or the value
+   is not a JS value. *)
+let js_tostring (v : Literal.t) : string option =
+  match v with
+  | String s -> Some s
+  | Num n -> Some (Utils.Arith_utils.js_number_to_string n)
+  | Bool b -> Some (if b then "true" else "false")
+  | Null -> Some "null"
+  | Undefined -> Some "undefined"
+  | _ -> None
+
+let js_toboolean (v : Literal.t) : bool option =
+  match v with
+  | Bool b -> Some b
+  | Num n -> Some (not (Float.is_nan n || n = 0.))
+  | String s -> Some (s <> "")
+  | Null | Undefined -> Some false
+  | Loc _ -> Some true
+  | _ -> None
+
+let rec js_looseeq (a : Literal.t) (b : Literal.t) : bool option =
+  let str_num s = Utils.Arith_utils.js_string_to_number s in
+  match (a, b) with
+  | (Undefined | Null), (Undefined | Null) -> Some true
+  | (Undefined | Null), (Bool _ | Num _ | String _ | Loc _)
+  | (Bool _ | Num _ | String _ | Loc _), (Undefined | Null) ->
+      Some false
+  | Bool x, Bool y -> Some (x = y)
+  | Num x, Num y -> Some (x = y) (* IEEE: NaN <> NaN, 0 = -0 *)
+  | String x, String y -> Some (String.equal x y)
+  | Loc x, Loc y -> Some (String.equal x y)
+  | Num x, String s -> Some (x = str_num s)
+  | String s, Num y -> Some (str_num s = y)
+  | Bool x, (Num _ | String _) -> js_looseeq (Num (if x then 1. else 0.)) b
+  | (Num _ | String _), Bool y -> js_looseeq a (Num (if y then 1. else 0.))
+  | _ -> None
+
 let eval_concrete name (args : Literal.t list) : Literal.t option =
   let open Literal in
   match (name, args) with
@@ -319,6 +372,12 @@ let eval_concrete name (args : Literal.t list) : Literal.t option =
         num_of_z (Z.of_string s)
       else Some (Num (-1.))
   | "str.in_re.numlit", [ String s ] -> Some (Bool (numlit_matches s))
+  | "ite.str", [ Bool c; (String _ as a); (String _ as b) ]
+  | "ite.num", [ Bool c; (Num _ as a); (Num _ as b) ] ->
+      Some (if c then a else b)
+  | "js.tostring", [ v ] -> Option.map (fun s -> String s) (js_tostring v)
+  | "js.toboolean", [ v ] -> Option.map (fun b -> Bool b) (js_toboolean v)
+  | "js.looseeq", [ a; b ] -> Option.map (fun b -> Bool b) (js_looseeq a b)
   | _ -> None
 
 (* Make the builtins known to the rest of GIL (typing of boolean expressions,

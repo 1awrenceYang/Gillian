@@ -508,8 +508,9 @@ proc OP_toLocaleString(xsc, vthis) {
             goto [c] call thrw;
 
 	call:	m := metadata(ret);
-			scp := [m, "@scope"];
-			fun := [m, "@call"];
+			sp_ct := "i__callTarget" (ret);
+			scp := l-nth (sp_ct, 1);
+			fun := l-nth (sp_ct, 0);
 			ret := fun (scp, vthis) with elab;
 
 	rlab: return;

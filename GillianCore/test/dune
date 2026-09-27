@@ -4,6 +4,6 @@
 
 (rule
  (alias runtest)
- (deps servpips_conformance.json)
+ (deps servpips_conformance.json servpips_conv_conformance.json)
  (action
   (run ./run_tests.exe -q --color=always)))

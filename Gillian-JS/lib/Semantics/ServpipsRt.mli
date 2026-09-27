@@ -90,7 +90,15 @@
       (section 4.5); names are checked against {!builtin_names}. Native GIL
       operations ([and or not = => typeof toNumber toString], and [ite] on
       booleans) are built directly; the others become [FuncApp] (their SMT
-      encoding is WP1's).
+      encoding is WP1's). [ite(c, a, b)] with non-Boolean branches (the
+      models' value-level conditional): a literal [c] selects a branch; two
+      string / two finite-number branches give the builtins [ite.str] /
+      [ite.num] (SMT [ite], no fork); other branch types fork on [c]; [c]
+      must be a GIL boolean (otherwise [unsupported]). The defined conversions [js.tostring],
+      [js.toboolean], [js.looseeq] (decision D-R2-2) are evaluated on
+      literal arguments and simplified for values of known type, in both
+      modes (under concrete execution a result that is not a literal is
+      [unsupported]).
     - [servpips_define(o, k, v)]: writes the data property [k] of [o]
       ([{d, v, true, true, true}]) directly (no [[Put]]) and adds [k] to
       [@sp_lazykeys]. [servpips_absent(o, k)]: writes a tombstone and removes
@@ -104,8 +112,45 @@
     - [servpips_arith(op, a, b, site)] (compiler): design section 4.4 rules
       1-5 (exact bounded integer arithmetic, division/modulo by a possibly
       zero divisor, non-finite literal operands, havoc
-      [arith(<op>)@<file:line:col>#k] with [decl]/[note{havoc}], overflow
-      branches [note{overflow-fork}]).
+      [arith(<op>)@<file:line:col>#k] with [decl]/[note{havoc}]). Exactness
+      (rule 2) also holds for [+]/[-] with an integer literal operand [c]
+      ([|c| <= 2^53]) and an integer other operand of magnitude at most
+      [2^53 - |c|], and for [*] with an integer literal [c] and an integer
+      other operand of magnitude at most [2^53 / |c|] (the result is an
+      integer of magnitude <= 2^53). Overflow (rule 5, decision D-R2-1):
+      when [|a op b| >= MAX] (the largest double) is satisfiable for a
+      havoc result, the overflow case is not explored: it is reported as
+      [note{arith-overflow}] and an [end{unsupported, "arith-overflow"}]
+      (path condition before the operation), and the path continues with
+      the (finite) havoc value only; there are no +/-Infinity branches.
+      Callers bound their numbers with sound range facts (lengths, dates,
+      DynamoDB numbers, ...) so that no overflow is satisfiable.
+    - [servpips_conv(op, v [, w])] (JSIL runtime, decision D-R2-2): called
+      by [i__isPrimitive] (op ["isPrimitive"]), [i__toString] (["toString"]),
+      [i__toBoolean] (["toBoolean"]) and [i__abstractEquality]
+      (["looseEq"], two values). Returns [none] (the procedure continues as
+      upstream) without [--servpips], under concrete execution, for
+      literals and values of known type, and for a value that can be no
+      primitive other than [undefined]/[null] (e.g. an optional object).
+      Otherwise the value's JS type is a union that includes a primitive
+      type other than undefined/null, and the result is computed without
+      forking per type:
+      - ["isPrimitive"]: [true] where the value is primitive, [false]
+        where it is an object, [none] where it is not a JS value (at most
+        three branches);
+      - ["toString"]: where the value is primitive, [js.tostring(v)] (or [v]
+        itself if it can only be a string); [none] where it is not
+        primitive (ToPrimitive of an object calls its methods);
+      - ["toBoolean"]: [js.toboolean(v)] where the value is a JS value
+        (objects are true; no method is called, so objects do not fork);
+        [none] where it is not;
+      - ["looseEq"]: [a == null] / [a == undefined] is [(a = null) or (a =
+        undefined)] for any value (no fork); otherwise [js.looseeq(a, b)]
+        where both values are primitive, [none] where one is not (or
+        either is a non-finite number literal).
+      The builtins are those of [Smt.Servpips_functions] (design 4.5 table,
+      [`Defined]). Every branch condition is checked for satisfiability
+      first; a side found unsatisfiable is reported as a [prune] event.
     - [servpips_tonumber(s)] (JSIL [i__toNumber] on strings): literal ->
       concrete ToNumber; symbolic under [--servpips] -> the four branches of
       section 4.4 (NaN / +Infinity / -Infinity / [ToNumberOp s]) with their
@@ -114,6 +159,13 @@
       [i__putValue] rejection): ends the path [unsupported(reason)];
       otherwise (inactive, see below) returns [undefined] and the runtime
       continues as upstream.
+    - [servpips_enabled()] (JSIL runtime): [true] iff the SERVPIPS semantics
+      is on ([--servpips], wpst or exec). [i__callTarget] (Internals.jsil)
+      uses it to call bound functions from the runtime (Array higher-order
+      functions, sort comparators, [Function.prototype.call/apply],
+      getters/setters, DefaultValue, the resolver hook) with the ES5
+      [[Call]] of bound functions ([i__boundCall] / [i__callFunction]);
+      without [--servpips] such calls fail as upstream (no [@scope]).
     - Runtime hooks called by the JSIL runtime: [servpips_resolver(l)] (the
       [@sp_resolver] of [l] or [empty]), [servpips_lazykey(l, p)] (is [p] in
       the [@sp_lazykeys] of [l]; a GIL boolean, symbolic for a symbolic

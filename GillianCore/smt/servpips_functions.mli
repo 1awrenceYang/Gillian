@@ -44,7 +44,52 @@
     JSON.quote(s)            Str -> Str           UF
     js.num2str(x)            Num -> Str           UF (used by the ToStringOp encoding)
     js.toUint32(x)           Num -> Num           UF (used by the ToUint32Op encoding)
+    js.tostring(v)           Any -> Str           defined (decision D-R2-2)
+    js.toboolean(v)          Any -> Bool          defined (decision D-R2-2)
+    js.looseeq(a,b)          Any,Any -> Bool      defined (decision D-R2-2)
+    ite.str(c,a,b)           Bool,Str,Str -> Str  native (ite c a b)
+    ite.num(c,a,b)           Bool,Num,Num -> Num  native (ite c a b)
     v}
+
+    [ite.str] / [ite.num] are the value-level conditional of
+    [__servpips_fn("ite", c, a, b)] when both branches are strings /
+    numbers (GIL has no conditional expression; Boolean branches use
+    [and]/[or]). On a literal condition, or equal branches, they are
+    reduced to a branch.
+
+    {b Defined builtins} (decision D-R2-2: conversions of a value whose JS
+    type is a union, without forking per type). Their arguments may have
+    any type ([Any], [None] in {!spec.args}); their SMT encoding is a
+    [define-fun] over [Extended_GIL_Literal], an [ite] over the type
+    constructors of the argument:
+    - [js.tostring(v)]: ES ToString of a {e primitive} [v]: a string is
+      itself, a (finite) number [n] is the [ToStringOp] encoding of [n] (the
+      check's [numToStr] shape: [str.from_int] for integers of magnitude
+      below 1e21, [js.num2str] otherwise), [true]/[false] are ["true"] /
+      ["false"], [null] is ["null"], [undefined] is ["undefined"]. For any
+      other value (objects, GIL-internal values) the result is unspecified
+      (the uninterpreted [js.tostring.other(v)]): ToString of an object calls
+      JS methods, so the JSIL runtime only builds [js.tostring(v)] when the
+      path condition implies that [v] is primitive.
+    - [js.toboolean(v)]: ES ToBoolean of any JS value: [undefined], [null]
+      are false, a boolean is itself, a number is [v <> 0] (NaN only exists
+      as a literal and is evaluated), a string is [v <> ""], an object
+      (location) is true; unspecified ([js.toboolean.other(v)]) for
+      GIL-internal values.
+    - [js.looseeq(a, b)]: ES IsLooselyEqual ([a == b]) of two {e primitive}
+      values: same type: strict equality; [null]/[undefined] equal each
+      other and nothing else; number and string: the string's ToNumber is
+      finite ([str.in_re.numlit], not [js.tonumber.ispinf], not
+      [js.tonumber.isninf]) and its value ([ToNumberOp] encoding) equals the
+      number; a boolean is compared as the number 0/1 (recursively, with
+      the rules above); two locations are equal iff identical; [null] /
+      [undefined] and a location are not equal. Unspecified
+      ([js.looseeq.other(a, b)]) when an object is compared with a boolean,
+      number or string (ToPrimitive calls JS methods) or for GIL-internal
+      values.
+    On literal arguments all three are evaluated ({!eval_concrete}, exact ES
+    semantics including NaN/Infinity/-0); where the result is unspecified
+    they are not evaluated.
 
     [R_numlit] is the ES2023 StringNumericLiteral grammar over UTF-16 code
     units (StrWhiteSpaceChar = WhiteSpace ∪ LineTerminator of ES2023 with the
@@ -53,12 +98,15 @@
 
 open Gil_syntax
 
-type smt = [ `Native of string | `Uf ]
+type smt = [ `Native of string | `Uf | `Defined ]
 
 type spec = {
-  args : Type.t list;  (** argument types *)
+  args : Type.t option list;
+      (** argument types; [None]: any type (only the [`Defined] builtins) *)
   ret : Type.t;  (** result type *)
-  smt : smt;  (** [`Native f]: SMT-LIB primitive [f]; [`Uf]: uninterpreted *)
+  smt : smt;
+      (** [`Native f]: SMT-LIB primitive [f]; [`Uf]: uninterpreted;
+          [`Defined]: engine-side definition over GIL values (see above) *)
 }
 
 (** Signature and encoding of a builtin; [None] if [name] is not a builtin. *)
@@ -78,11 +126,23 @@ val is_bool : string -> bool
 val funcs_for_prog : unit -> (string * Func.t) list
 
 (** Concrete evaluation of a [`Native] builtin on literal arguments, with the
-    SMT-LIB semantics (conversions [to_int] = floor). [None] when [name] is
-    not a native builtin, an argument has the wrong type, a [Num] argument is
-    not finite, or the exact result is not representable as a GIL literal
-    (e.g. [str.to_int] of more than 2^53). *)
+    SMT-LIB semantics (conversions [to_int] = floor), and of a [`Defined]
+    builtin with its ES semantics. [None] when [name] is not a native or
+    defined builtin, an argument has the wrong type, a [Num] argument is
+    not finite (native builtins), the exact result is not representable as
+    a GIL literal (e.g. [str.to_int] of more than 2^53), or the result of a
+    defined builtin is unspecified (see above). *)
 val eval_concrete : string -> Literal.t list -> Literal.t option
+
+(** ES ToString of a primitive literal ([None] for other literals). *)
+val js_tostring : Literal.t -> string option
+
+(** ES ToBoolean of a JS literal (locations are objects: [true]). *)
+val js_toboolean : Literal.t -> bool option
+
+(** ES IsLooselyEqual of two literals ([None] when ToPrimitive of an object
+    would be needed, or for non-JS literals). *)
+val js_looseeq : Literal.t -> Literal.t -> bool option
 
 (** The StrWhiteSpaceChar code units, as inclusive ranges. *)
 val ws_ranges : (int * int) list

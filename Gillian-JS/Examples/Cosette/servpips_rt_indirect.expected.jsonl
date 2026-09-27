@@ -1,0 +1,12 @@
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "app.js:6:1:30", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "app.js:7:1:30", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "note", "code": "get", "msg": "null", "site": null, "data": null}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [], "types": []}
+{"ev": "stats", "leaves": 1, "ends": {"returned": 1, "threw": 0, "truncated": 0, "unknown": 0, "unsupported": 0, "error": 0}, "infeasible": 0, "vanished": 0, "max_branch": 0, "fatal": null, "solver": {"unknown_assumed_sat": 0, "entail_unknown": 0, "encode_failures": 0}}

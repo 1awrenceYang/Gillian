@@ -51,6 +51,10 @@ let builtin_names : (string * int option) list =
     ("JSON.quote", Some 1);
     ("js.num2str", Some 1);
     ("js.toUint32", Some 1);
+    (* decision D-R2-2: conversions of values of any JS type *)
+    ("js.tostring", Some 1);
+    ("js.toboolean", Some 1);
+    ("js.looseeq", Some 2);
     (* native GIL operations *)
     ("and", None);
     ("or", None);
@@ -121,6 +125,7 @@ let json_opt_string = function
 
 (* Numbers used by the arithmetic rules *)
 let two52 = 4503599627370496.
+let two53 = 9007199254740992.
 let two26 = 67108864.
 
 (* Site label of a site string: [file:line:col] (drop the end position). *)
@@ -791,7 +796,7 @@ module Make (E : X.ENV) = struct
   (* servpips_fn("<name>", a1, ...)                                      *)
   (* ------------------------------------------------------------------ *)
 
-  let fn (st : st) (args : vt list) : outcome list =
+  let rec fn (st : st) (args : vt list) : outcome list =
     match args with
     | [] -> fail_err "missing builtin name"
     | name :: fargs -> (
@@ -822,13 +827,73 @@ module Make (E : X.ENV) = struct
           | "toString", [ e ] -> Some (UnOp (ToStringOp, e))
           | _ -> None
         in
-        match native with
-        | Some e -> [ X.Return (st, guard (fun () -> S.eval_expr st e)) ]
-        | None ->
+        let defined =
+          match Gillian.Servpips_functions.lookup name with
+          | Some { smt = `Defined; _ } -> true
+          | _ -> false
+        in
+        match (native, name, fargs) with
+        | Some e, _, _ -> [ X.Return (st, guard (fun () -> S.eval_expr st e)) ]
+        | None, "ite", [ c; a; b ] -> ite st c a b
+        | None, _, _ when defined ->
+            (* evaluated on literal arguments (both modes); the conversion
+               of a value of known type is simplified *)
+            let e = Expr.FuncApp (name, es) in
+            let v = guard (fun () -> S.eval_expr st e) in
+            if (not E.symbolic) && V.to_literal v = None then
+              fail_uns "builtin %s not evaluable on %s" name
+                (Fmt.to_to_string (Fmt.list ~sep:Fmt.comma V.pp) fargs)
+            else [ X.Return (st, v) ]
+        | None, _, _ ->
             let e = Expr.FuncApp (name, es) in
             if not E.symbolic then
               fail_uns "builtin %s under concrete execution" name
             else [ X.Return (st, v_of_expr e) ])
+
+  (* __servpips_fn("ite", c, a, b) with non-Boolean branches: GIL has no
+     conditional expression. A literal condition selects a branch; two
+     string / two (finite) number branches give ite.str / ite.num (SMT ite,
+     no fork); otherwise the path forks on the condition. The condition
+     must be a GIL Boolean (a non-Boolean condition would be encoded with a
+     type guard, i.e. a stronger path condition). *)
+  and ite (st : st) (c : vt) (a : vt) (b : vt) : outcome list =
+    let ec = e_of c and ea = e_of a and eb = e_of b in
+    match V.to_literal c with
+    | Some (Bool true) -> [ X.Return (st, a) ]
+    | Some (Bool false) -> [ X.Return (st, b) ]
+    | Some _ -> fail_err "ite: condition is not a boolean: %s" (pp_v c)
+    | None ->
+        let is_bool =
+          (match guard (fun () -> S.get_type st c) with
+          | Some BooleanType -> true
+          | _ -> false)
+          || Expr.is_boolean_expr ec
+        in
+        if not is_bool then
+          fail_uns "ite: condition is not known to be a GIL boolean: %s" (pp_v c);
+        if not E.symbolic then fail_uns "ite: symbolic condition under concrete execution";
+        let ty v = guard (fun () -> S.get_type st v) in
+        let finite_or_symbolic e =
+          match e with
+          | Expr.Lit (Num f) -> Float.is_finite f
+          | _ -> true
+        in
+        let app f = [ X.Return (st, guard (fun () -> S.eval_expr st (Expr.FuncApp (f, [ ec; ea; eb ])))) ] in
+        match (ty a, ty b) with
+        | Some StringType, Some StringType -> app "ite.str"
+        | Some NumberType, Some NumberType
+          when finite_or_symbolic ea && finite_or_symbolic eb ->
+            app "ite.num"
+        | _ ->
+            let not_c = Expr.UnOp (Not, ec) in
+            let br f v =
+              if sat st [ f ] then
+                match assume_all st [ f ] with
+                | Some st -> [ X.Return (st, v) ]
+                | None -> []
+              else []
+            in
+            br ec a @ br not_c b
 
   (* ------------------------------------------------------------------ *)
   (* servpips_define / servpips_absent / servpips_mark                   *)
@@ -1169,10 +1234,43 @@ module Make (E : X.ENV) = struct
                   BinOp (e, FLessThan, num bound);
                 ]
               in
+              (* an integer literal operand c (|c| <= 2^53) allows the
+                 other integer operand up to 2^53 - |c| (+, -) or
+                 2^53 / |c| ( * ): the exact result is an integer of
+                 magnitude <= 2^53, hence a double (the converter's
+                 guards for inexact arithmetic are the same) *)
+              let int_lit = function
+                | Some f when Float.is_integer f && Float.abs f <= two53 ->
+                    Some (Float.abs f)
+                | _ -> None
+              in
+              let int_le bound e =
+                [
+                  Expr.UnOp (IsInt, e);
+                  BinOp (num (-.bound), FLessThanEqual, e);
+                  BinOp (e, FLessThanEqual, num bound);
+                ]
+              in
+              let with_literal ~add =
+                match (int_lit la, int_lit lb) with
+                | Some c, _ | _, Some c ->
+                    let other = if int_lit la <> None then eb else ea in
+                    let bound =
+                      if add then two53 -. c
+                      else if c = 0. then two53
+                      else Float.floor (two53 /. c)
+                    in
+                    entails st (int_le bound other)
+                | None, None -> false
+              in
               let exact_ok =
                 match op with
-                | "+" | "-" -> entails st (int_in two52 ea @ int_in two52 eb)
-                | "*" -> entails st (int_in two26 ea @ int_in two26 eb)
+                | "+" | "-" ->
+                    entails st (int_in two52 ea @ int_in two52 eb)
+                    || with_literal ~add:true
+                | "*" ->
+                    entails st (int_in two26 ea @ int_in two26 eb)
+                    || with_literal ~add:false
                 | "%" -> entails st [ UnOp (IsInt, ea); UnOp (IsInt, eb) ]
                 | "/" -> (
                     match lb with
@@ -1182,7 +1280,12 @@ module Make (E : X.ENV) = struct
               in
               if exact_ok then [ ret st exact ]
               else
-                (* rule 4: havoc, rule 5: overflow *)
+                (* rule 4: havoc; rule 5 (decision D-R2-1): when the
+                   result may overflow, the overflow case is not
+                   explored: it ends as [unsupported("arith-overflow")]
+                   (fail closed), and the path continues with the havoc
+                   value (a finite number) *)
+                let pc0 = pc_types st in
                 let label = site_label site in
                 let name = Printf.sprintf "arith(%s)@%s#" op label in
                 let st, k = next_count st name in
@@ -1191,21 +1294,210 @@ module Make (E : X.ENV) = struct
                 emit_decl ~lvar:x ~name ~sort:"Num" ~kind:"havoc"
                   ~site:(`String site) ~k:(`Int k) ();
                 Servpips.note ~code:"havoc" ~msg:name ~site ();
-                let overflow =
-                  if op = "%" then []
-                  else
-                    let maxv = num Float.max_float in
-                    let p = Expr.BinOp (maxv, FLessThanEqual, exact) in
-                    let n = Expr.BinOp (exact, FLessThanEqual, num (-.Float.max_float)) in
-                    let pb = if sat st [ p ] then [ X.Return (S.copy st, vnum Float.infinity) ] else [] in
-                    let nb = if sat st [ n ] then [ X.Return (S.copy st, vnum Float.neg_infinity) ] else [] in
-                    if pb <> [] || nb <> [] then
-                      Servpips.note ~code:"overflow-fork" ~msg:name ~site ();
-                    pb @ nb
-                in
-                X.Return (st, r) :: overflow)
+                (if op <> "%" then
+                   let maxv = num Float.max_float in
+                   let p = Expr.BinOp (maxv, FLessThanEqual, exact) in
+                   let n =
+                     Expr.BinOp (exact, FLessThanEqual, num (-.Float.max_float))
+                   in
+                   if sat st [ Expr.BinOp (p, Or, n) ] then (
+                     Servpips.note ~code:"arith-overflow" ~msg:name ~site ();
+                     let pc, types = pc0 in
+                     Servpips.record_end ~status:"unsupported"
+                       ~reason:"arith-overflow" ~pc ~types ()));
+                [ X.Return (st, r) ])
         in
         zero_branches @ nonzero_branches
+
+  (* ------------------------------------------------------------------ *)
+  (* servpips_conv(op, v [, w])  (JSIL runtime; decision D-R2-2)         *)
+  (* ------------------------------------------------------------------ *)
+
+  (* [typeOf e = t] *)
+  let t_is e (t : Type.t) = Expr.BinOp (UnOp (TypeOf, e), Equal, Lit (Type t))
+
+  let disj = function
+    | [] -> Expr.false_
+    | e :: es -> List.fold_left (fun a b -> Expr.BinOp (a, Or, b)) e es
+
+  let prim_types : Type.t list =
+    [ UndefinedType; NullType; BooleanType; NumberType; StringType ]
+
+  (* [e] is a JS primitive value / a JS object / a JS value *)
+  let prim_f e = disj (List.map (t_is e) prim_types)
+  let obj_f e = t_is e ObjectType
+  let js_f e = disj (List.map (t_is e) (prim_types @ [ ObjectType ]))
+  let not_ e = Expr.UnOp (Not, e)
+
+  (* Which sides of [f] are satisfiable under the path condition of [st]
+     (the path condition itself is satisfiable: a live configuration). A
+     dropped side is reported as a [prune] event (E13), like a dropped
+     side of a JSIL goto. *)
+  let split (st : st) (f : Expr.t) : bool * bool =
+    let prune kept =
+      let pc, types = pc_types st in
+      Servpips.record_prune ~guard:f ~guard_orig:f ~kept
+        ~by:!Servpips.last_decision ~pc ~types ()
+    in
+    if not (sat st [ not_ f ]) then (
+      prune "then";
+      (true, false))
+    else if not (sat st [ f ]) then (
+      prune "else";
+      (false, true))
+    else (true, true)
+
+  (* the branch where [f] holds (resp. fails): [st] itself when the other
+     side is unsatisfiable, a copy with [f] (resp. [not f]) assumed
+     otherwise *)
+  let side (st : st) (f : Expr.t) ~(both : bool) : st option =
+    if both then assume_all st [ f ] else Some st
+
+  let conv (st : st) (args : vt list) : outcome list =
+    let none = lit Literal.Nono in
+    let pass st = X.Return (st, none) in
+    let op, vs =
+      match args with
+      | op :: vs -> (string_arg "op" op, vs)
+      | [] -> fail_err "missing operation"
+    in
+    let known v =
+      V.to_literal v <> None
+      || (match guard (fun () -> S.get_type st v) with
+         | Some _ -> true
+         | None -> false)
+    in
+    let fn name es = v_of_expr (Expr.FuncApp (name, es)) in
+    (* [on_prim] where [e] is primitive, [on_other] where it is not; one
+       branch per satisfiable side *)
+    let by_prim st e ~on_prim ~on_other =
+      let p = prim_f e in
+      let can_p, can_np = split st p in
+      let both = can_p && can_np in
+      let bp =
+        if can_p then
+          match side st p ~both with
+          | Some st -> [ on_prim st ]
+          | None -> []
+        else []
+      in
+      let bn =
+        if can_np then
+          match side st (not_ p) ~both with
+          | Some st -> on_other st
+          | None -> []
+        else []
+      in
+      bp @ bn
+    in
+    (* The builtins only save forks where the value may be a primitive
+       other than undefined / null: otherwise (e.g. an optional object,
+       undefined or an object) the upstream procedure forks at most on
+       undefined / null / object, with plain type atoms. *)
+    let nn_prim e =
+      Expr.BinOp
+        ( prim_f e,
+          And,
+          not_ (Expr.BinOp (t_is e UndefinedType, Or, t_is e NullType)) )
+    in
+    let only_nullish v = not (sat st [ nn_prim (e_of v) ]) in
+    match (op, vs) with
+    | ("isPrimitive" | "toString" | "toBoolean"), [ v ] when known v -> [ pass st ]
+    | ("isPrimitive" | "toString" | "toBoolean"), [ v ] when only_nullish v ->
+        [ pass st ]
+    | "isPrimitive", [ v ] ->
+        (* primitive: true; object: false; anything else: upstream *)
+        let e = e_of v in
+        by_prim st e
+          ~on_prim:(fun st -> X.Return (st, vbool true))
+          ~on_other:(fun st ->
+            let o = obj_f e in
+            let can_o, can_x = split st o in
+            let both = can_o && can_x in
+            (if can_o then
+               match side st o ~both with
+               | Some st -> [ X.Return (st, vbool false) ]
+               | None -> []
+             else [])
+            @
+            if can_x then
+              match side st (not_ o) ~both with
+              | Some st -> [ pass st ]
+              | None -> []
+            else [])
+    | "toString", [ v ] ->
+        (* primitive: js.tostring(v); otherwise upstream (ToPrimitive of an
+           object calls its methods) *)
+        let e = e_of v in
+        let str_only st = not (sat st [ not_ (t_is e StringType) ]) in
+        by_prim st e
+          ~on_prim:(fun st ->
+            (* a string is its own ToString *)
+            if str_only st then X.Return (st, v)
+            else X.Return (st, fn "js.tostring" [ e ]))
+          ~on_other:(fun st -> [ pass st ])
+    | "toBoolean", [ v ] ->
+        (* any JS value: js.toboolean(v) (objects are true, no method is
+           called); a non-JS value: upstream *)
+        let e = e_of v in
+        let j = js_f e in
+        let can_j, can_nj = split st j in
+        let both = can_j && can_nj in
+        (if can_j then
+           match side st j ~both with
+           | Some st -> [ X.Return (st, fn "js.toboolean" [ e ]) ]
+           | None -> []
+         else [])
+        @
+        if can_nj then
+          match side st (not_ j) ~both with
+          | Some st -> [ pass st ]
+          | None -> []
+        else []
+    | "looseEq", [ a; b ] -> (
+        let ea = e_of a and eb = e_of b in
+        let nullish_lit v =
+          match V.to_literal v with
+          | Some (Null | Undefined) -> true
+          | _ -> false
+        in
+        let nonfinite_lit v =
+          match V.to_literal v with
+          | Some (Num f) -> not (Float.is_finite f)
+          | _ -> false
+        in
+        match () with
+        | _ when V.to_literal a <> None && V.to_literal b <> None -> [ pass st ]
+        | _ when nullish_lit a || nullish_lit b ->
+            (* x == null: x is null or undefined (an object is not; no
+               method is called) *)
+            let o = if nullish_lit a then eb else ea in
+            let r =
+              Expr.BinOp
+                ( BinOp (o, Equal, Lit Null),
+                  Or,
+                  BinOp (o, Equal, Lit Undefined) )
+            in
+            [ X.Return (st, guard (fun () -> S.eval_expr st r)) ]
+        | _ when nonfinite_lit a || nonfinite_lit b -> [ pass st ]
+        | _ when known a && known b -> [ pass st ]
+        | _ ->
+            (* both primitive: js.looseeq(a, b); otherwise upstream *)
+            let g = Expr.BinOp (prim_f ea, And, prim_f eb) in
+            let can_g, can_ng = split st g in
+            let both = can_g && can_ng in
+            (if can_g then
+               match side st g ~both with
+               | Some st -> [ X.Return (st, fn "js.looseeq" [ ea; eb ]) ]
+               | None -> []
+             else [])
+            @
+            if can_ng then
+              match side st (not_ g) ~both with
+              | Some st -> [ pass st ]
+              | None -> []
+            else [])
+    | _ -> fail_err "invalid operation %s/%d" op (List.length vs)
 end
 
 (* ------------------------------------------------------------------------ *)
@@ -1549,6 +1841,53 @@ let rejected_h : X.handler =
         M.rejected st args);
   }
 
+(* servpips_conv: called by every ToBoolean / ToString / ToPrimitive / ==
+   of the JSIL runtime; inactive (none: the runtime continues as upstream)
+   without --servpips, under concrete execution and on literals or values of
+   known type, decided before the functor is applied. *)
+let conv_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (args : vt list) ->
+        let pass = [ X.Return (st, E.Val.from_literal Literal.Nono) ] in
+        let is_lit v = E.Val.to_literal v <> None in
+        let known v =
+          is_lit v
+          ||
+          match E.State.get_type st v with
+          | Some _ -> true
+          | None -> false
+          | exception _ -> false
+        in
+        if (not (Servpips.enabled ())) || not E.symbolic then pass
+        else
+          match args with
+          | [ _; v ] when known v -> pass
+          | [ _; a; b ] when is_lit a && is_lit b -> pass
+          | _ ->
+              let module M = Make (E) in
+              M.conv st args);
+  }
+
+(* servpips_enabled(): is the SERVPIPS semantics on (--servpips, wpst or
+   exec)? Used by the JSIL runtime to gate SERVPIPS-only behaviour that
+   needs no other extern (calls of bound functions, i__callTarget). *)
+let enabled_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (_ : vt list) ->
+        let on =
+          Servpips.enabled () || !Gillian.Utils.Config.servpips_semantics
+        in
+        [ X.Return (st, E.Val.from_literal (Literal.Bool on)) ]);
+  }
+
 let initialised = ref false
 
 let init () =
@@ -1569,6 +1908,8 @@ let init () =
         ("servpips_arith", arith_h);
         ("servpips_tonumber", tonumber_h);
         ("servpips_rejected", rejected_h);
+        ("servpips_conv", conv_h);
+        ("servpips_enabled", enabled_h);
         ("servpips_resolver", resolver_h);
         ("servpips_lazykey", lazykey_h);
         ("servpips_model_miss", model_miss_h);
