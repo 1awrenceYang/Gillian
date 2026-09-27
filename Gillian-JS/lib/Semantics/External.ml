@@ -225,8 +225,18 @@ struct
              })
     | Some h ->
         let outcomes = h.run (servpips_env name cs i) state v_args in
-        List.map
-          (function
+        (* Every branch after the first gets its own copy of the call stack,
+           as the interpreter does for the branches of its own commands
+           (Call_stack.copy in G_interpreter): the stores of the calling
+           procedures live in the call stack and are mutable. Sharing them
+           let the first branch's later assignments in a caller (e.g. the
+           accumulator of String.prototype.concat after a forking
+           servpips_conv in i__toString) leak into the other branches. The
+           handler copies the states themselves (ServpipsExterns.mli). *)
+        List.mapi
+          (fun ix outcome ->
+            let cs = if ix = 0 then cs else Call_stack.copy cs in
+            match outcome with
             | ServpipsExterns.Return (st, v) -> (update_store st x v, cs, i, i + 1)
             | ServpipsExterns.Throw (st, v) -> (
                 match j with
