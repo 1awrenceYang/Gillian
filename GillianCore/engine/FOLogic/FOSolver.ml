@@ -83,7 +83,9 @@ let check_satisfiability_with_model (fs : Expr.t list) (gamma : Type_env.t) :
               m "Error when attempting to get SMT model: %s"
                 (Printexc.to_string e))
         in
-        None)
+        (* SERVPIPS (E3): the query was satisfiable; failing to lift the model
+           must not turn it into unsatisfiable *)
+        if !Smt.servpips_mode then Some subst else None)
 
 let check_satisfiability
     ?(matching = false)
