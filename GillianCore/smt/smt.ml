@@ -2254,7 +2254,7 @@ let exec_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
    another environment could drop a feasible branch. The hash covers every
    formula (the polymorphic hash only looks at a few nodes: sets sharing a
    prefix collided and were compared in full), and the table is emptied
-   when it reaches SERVPIPS_SMT_CACHE entries (default 50000) so that long
+   when it reaches SERVPIPS_SMT_CACHE entries (default 10000) so that long
    shards do not keep every query of the run. *)
 module Servpips_sat_cache = struct
   type key = Expr.Set.t * (string * Type.t) list
@@ -2279,8 +2279,8 @@ module Servpips_sat_cache = struct
     | Some s -> (
         match int_of_string_opt (String.trim s) with
         | Some n when n > 0 -> n
-        | _ -> 50000)
-    | None -> 50000
+        | _ -> 10000)
+    | None -> 10000
 
   let tbl : sexp option Tbl.t = Tbl.create 4096
 
