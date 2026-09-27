@@ -36,4 +36,20 @@ if (c === 0) {
   show("x-inf", x - Infinity);
   show("nan+x", NaN + x);
   show("x/inf", x / Infinity);
+} else if (c === 6) {
+  /* RV3: after x === 0.1 the operation is concrete (IEEE): 0.1 + 0.2 !== 0.3 */
+  if (x === 0.1) {
+    if (x + 0.2 === 0.3) { show("rv3-A", x); } else { show("rv3-B", x); }
+  }
+} else if (c === 7) {
+  /* RV7: x + 0.1 is havoc under x >= 0.7: both outcomes of === 0.8 remain */
+  if (x >= 0.7) {
+    if (x + 0.1 === 0.8) { show("rv7-A", x); } else { show("rv7-B", x); }
+  }
+} else if (c === 8) {
+  /* bounded operands: x * 3 is havoc (x is not known to be an integer) but
+     cannot overflow, so there is no overflow branch */
+  if (0 <= x && x <= 10) {
+    show("bounded", x * 3);
+  }
 }
