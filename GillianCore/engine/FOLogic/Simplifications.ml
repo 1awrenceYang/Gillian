@@ -53,9 +53,29 @@ let simplification_cache_find key =
     Servpips_key_tbl.find_opt servpips_simplification_cache key
   else Hashtbl.find_opt simplification_cache key
 
+(* SERVPIPS (E19): the cache keeps every simplified path condition of every
+   path (keys, answers and the formulae they retain): ~4.5 MB per path of the
+   m2 probe, so a long shard (L=2, >1500 paths) reached the 8 GB container
+   limit. In SERVPIPS mode it is emptied when it reaches
+   SERVPIPS_SIMPL_CACHE entries (default 20000), together with the memos that
+   refer to its entries. A later miss recomputes the simplification: the
+   answer is equivalent (the cache is a memo), though not always identical in
+   form (upstream, a hit returns the answer before the ALoc-transitivity step
+   of the miss path). Runs below the bound are unaffected. *)
+let servpips_cache_max =
+  match Sys.getenv_opt "SERVPIPS_SIMPL_CACHE" with
+  | Some s -> ( match int_of_string_opt s with Some n when n > 0 -> n | _ -> 20000)
+  | None -> 20000
+
+let servpips_cache_resets : (unit -> unit) list ref = ref []
+
 let simplification_cache_add key v =
-  if !Config.servpips_semantics then
-    Servpips_key_tbl.replace servpips_simplification_cache key v
+  if !Config.servpips_semantics then (
+    if Servpips_key_tbl.length servpips_simplification_cache >= servpips_cache_max
+    then (
+      Servpips_key_tbl.reset servpips_simplification_cache;
+      List.iter (fun f -> f ()) !servpips_cache_resets);
+    Servpips_key_tbl.replace servpips_simplification_cache key v)
   else Hashtbl.replace simplification_cache key v
 
 (* SERVPIPS (E19): the symbolic state is simplified before every memory
@@ -112,6 +132,13 @@ let servpips_stamp_memo :
   Hashtbl.create 1024
 
 let same_save a b = Option.equal (fun (a, b) (c, d) -> SS.equal a c && b = d) a b
+
+let () =
+  servpips_cache_resets :=
+    (fun () ->
+      Hashtbl.reset servpips_stamp_memo;
+      servpips_memo_slot := None)
+    :: !servpips_cache_resets
 
 (** The effect of a cache hit on entry [cached] (upstream), then the SERVPIPS
     stamps and memos. [key] is the key when it was built. *)
