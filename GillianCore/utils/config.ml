@@ -6,6 +6,13 @@
 
 let under_approximation = ref false
 
+(** SERVPIPS: use the SERVPIPS (ECMAScript-conformant) concrete semantics
+    and reductions: IEEE comparisons with non-finite literals (E7),
+    ES2023 StringToNumber (E16), Number::toString (E8), Math.sign. Set by
+    [wpst --servpips] and [exec --servpips]; off by default (upstream
+    behaviour). *)
+let servpips_semantics = ref false
+
 let results_dir, set_result_dir =
   let rd = ref ".gillian" in
   ((fun () -> !rd), fun r -> rd := r)

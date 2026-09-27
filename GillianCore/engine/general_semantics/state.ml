@@ -108,6 +108,12 @@ module type S = sig
   (** Turns a state into a list of assertions *)
   val to_assertions : ?to_keep:Containers.SS.t -> t -> Asrt.t
 
+  (** SERVPIPS: the pure part of the state, without the heap and the store:
+      its path condition (a conjunction of pure formulas) and its type
+      environment. Cheap (no conversion of the heap). Concrete states return
+      [([], [])]. *)
+  val servpips_pc : t -> Expr.t list * (Expr.t * Type.t) list
+
   val evaluate_slcmd : 'a MP.prog -> SLCmd.t -> t -> (t, err_t) Res_list.t
 
   (** [match_invariant prog revisited state invariant binders] returns a list of

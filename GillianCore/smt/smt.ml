@@ -6,6 +6,7 @@ open Prog_env
 
 (* open Ctx *)
 module L = Logging
+module Servpips_functions = Servpips_functions
 
 exception SMT_error of string
 
@@ -29,6 +30,21 @@ let z3_config () =
 let () = Sys.(set_signal sigpipe Signal_ignore)
 
 exception SMT_unknown
+
+(* SERVPIPS (E3). In SERVPIPS mode a query answered [unknown] is not an error:
+   [check_sat] returns [Some unknown_model] (callers treat it as satisfiable /
+   not entailed and report it), and any failure while encoding a query is
+   reported as [SMT_encoding_failure]. *)
+let servpips_mode = ref false
+let query_count = ref 0
+
+exception SMT_encoding_failure of string
+
+let unknown_model = Sexplib.Sexp.Atom "servpips:unknown"
+
+let is_unknown_model = function
+  | Sexplib.Sexp.Atom "servpips:unknown" -> true
+  | _ -> false
 
 let pp_sexp = Sexplib.Sexp.pp_hum
 let ( <| ) constr e = app constr [ e ]
@@ -229,6 +245,8 @@ let rec init_solver () =
   let () =
     z3_config () |> List.iter (fun (k, v) -> cmd (set_option (":" ^ k) v))
   in
+  (* SERVPIPS: strings are sequences of UTF-16 code units *)
+  let () = if !servpips_mode then cmd (set_option ":encoding" "bmp") in
   ()
 
 and protected_command solver s =
@@ -920,6 +938,10 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
         | _ -> none_encoding)
     | Bool b -> bool_k b >- BooleanType
     | Int i -> int_zk i >- IntType
+    | Num n when !servpips_mode && not (Float.is_finite n) ->
+        (* SERVPIPS (E7): NaN/Infinity are not reals; atoms with non-finite
+           literals must have been evaluated before encoding *)
+        exceptf "non-finite number literal %s" (Float.to_string n)
     | Num n -> real_k (Q.of_float n) >- NumberType
     | String s -> string_k s >- StringType
     | Loc l -> encode_string l >- ObjectType
@@ -956,6 +978,151 @@ let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
       let>- p1 = extend_wrap p1 in
       let>- p2 = extend_wrap p2 in
       eq p1.expr p2.expr >- BooleanType
+
+(* ------------------------------------------------------------------ *)
+(* SERVPIPS encodings (E5, E6): builtin functions and numeric operators *)
+(* ------------------------------------------------------------------ *)
+module Servpips_enc = struct
+  let sort_of = function
+    | Type.StringType -> t_string
+    | NumberType -> t_real
+    | BooleanType -> t_bool
+    | t -> exceptf "SERVPIPS builtin: unsupported sort %s" (Type.str t)
+
+  (* one declaration per uninterpreted builtin, shared by every use *)
+  let uf_defs : (string, definition) Hashtbl.t = Hashtbl.create 16
+
+  let uf_def name (spec : Servpips_functions.spec) =
+    match Hashtbl.find_opt uf_defs name with
+    | Some d -> d
+    | None ->
+        let d =
+          make_definition
+            [
+              declare_fun name (List.map sort_of spec.args) (sort_of spec.ret);
+            ]
+        in
+        Hashtbl.replace uf_defs name d;
+        d
+
+  let uf name args =
+    match Servpips_functions.lookup name with
+    | Some spec ->
+        require_definition (uf_def name spec);
+        app_ name args
+    | None -> exceptf "SERVPIPS: unknown builtin %s" name
+
+  let numlit_name = "servpips.R_numlit"
+
+  let numlit_def =
+    lazy
+      (make_definition
+         [
+           define_fun numlit_name [] (atom "RegLan")
+             (Servpips_functions.numlit_regex ());
+         ])
+
+  let fc n = app_ "str.from_code" [ int_k n ]
+
+  let ws_star =
+    lazy
+      (let range (lo, hi) =
+         if lo = hi then app_ "str.to_re" [ fc lo ]
+         else app_ "re.range" [ fc lo; fc hi ]
+       in
+       app_ "re.*"
+         [ app_ "re.union" (List.map range Servpips_functions.ws_ranges) ])
+
+  let digits_plus = lazy (app_ "re.+" [ app_ "re.range" [ fc 48; fc 57 ] ])
+  let rk f = real_k (Q.of_float f)
+  let zero = rk 0.
+  let is_int_real r = eq (int_to_real (real_to_int r)) r
+
+  (* ToStringOp: the check's numToStr shape *)
+  let num_to_str r =
+    let big = rk 1e21 in
+    let isint = is_int_real r in
+    let nonneg = bool_ands [ isint; num_leq zero r; num_lt r big ] in
+    let neg = bool_ands [ isint; num_lt r zero; num_lt (num_neg big) r ] in
+    ite nonneg
+      (app_ "str.from_int" [ real_to_int r ])
+      (ite neg
+         (app_ "str.++"
+            [ string_k "-"; app_ "str.from_int" [ real_to_int (num_neg r) ] ])
+         (uf "js.num2str" [ r ]))
+
+  (* ToNumberOp (finite branch of ToNumber): exact for short digit strings
+     and whitespace-only strings, js.tonumber.num otherwise *)
+  let str_to_num s =
+    let digits =
+      bool_and
+        (app_ "str.in_re" [ s; Lazy.force digits_plus ])
+        (num_lt (app_ "str.len" [ s ]) (int_k 16))
+    in
+    let ws_only = app_ "str.in_re" [ s; Lazy.force ws_star ] in
+    ite digits
+      (int_to_real (app_ "str.to_int" [ s ]))
+      (ite ws_only zero (uf "js.tonumber.num" [ s ]))
+
+  let floor x = int_to_real (real_to_int x)
+  let ceil x = num_neg (floor (num_neg x))
+  let abs x = ite (num_leq zero x) x (num_neg x)
+  let sgn x = ite (num_lt zero x) (rk 1.) (ite (num_lt x zero) (rk (-1.)) zero)
+  let round x = floor (num_add x (rk 0.5))
+  let trunc x = ite (num_leq zero x) (floor x) (num_neg (floor (num_neg x)))
+  let two32 = rk 4294967296.
+  let two31 = rk 2147483648.
+
+  let to_uint32 x =
+    ite
+      (bool_ands [ is_int_real x; num_leq zero x; num_lt x two32 ])
+      x
+      (uf "js.toUint32" [ x ])
+
+  let to_int32 x =
+    let u = uf "js.toUint32" [ x ] in
+    ite
+      (bool_ands [ is_int_real x; num_leq (num_neg two31) x; num_lt x two31 ])
+      x
+      (ite (num_leq two31 u) (num_sub u two32) u)
+
+  let to_uint16 x =
+    let u = uf "js.toUint32" [ x ] in
+    ite
+      (bool_ands [ is_int_real x; num_leq zero x; num_lt x (rk 65536.) ])
+      x
+      (int_to_real (num_mod (real_to_int u) (int_k 65536)))
+
+  (* JS remainder (sign of the dividend), for b <> 0 *)
+  let fmod a b = num_sub a (num_mul b (trunc (app_ "/" [ a; b ])))
+
+  let builtin name (args : Encoding.t list) : Encoding.t =
+    let open Encoding in
+    let spec =
+      match Servpips_functions.lookup name with
+      | Some s -> s
+      | None -> exceptf "SERVPIPS: unknown builtin %s" name
+    in
+    if List.length args <> List.length spec.args then
+      exceptf "SERVPIPS builtin %s: %d arguments given, %d expected" name
+        (List.length args) (List.length spec.args);
+    let>-- args = List.map2 get_native_of_type spec.args args in
+    let xs = List.map (fun (a : Encoding.t) -> a.expr) args in
+    match (spec.smt, xs) with
+    | `Uf, _ -> uf name xs >- spec.ret
+    | `Native "str.indexof", [ s; p; i ] ->
+        int_to_real (app_ "str.indexof" [ s; p; real_to_int i ]) >- NumberType
+    | `Native "str.substr", [ s; i; n ] ->
+        app_ "str.substr" [ s; real_to_int i; real_to_int n ] >- StringType
+    | `Native "str.from_int", [ i ] ->
+        app_ "str.from_int" [ real_to_int i ] >- StringType
+    | `Native "str.to_int", [ s ] ->
+        int_to_real (app_ "str.to_int" [ s ]) >- NumberType
+    | `Native "str.in_re.numlit", [ s ] ->
+        require_definition (Lazy.force numlit_def);
+        app_ "str.in_re" [ s; atom numlit_name ] >- BooleanType
+    | `Native f, xs -> app_ f xs >- spec.ret
+end
 
 let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
     =
@@ -1071,6 +1238,10 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- p1 = get_string p1 in
       let>- p2 = get_string p2 in
       atom "str.++" $$ [ p1.expr; p2.expr ] >- StringType
+  | FMod when !servpips_mode ->
+      let>- p1 = get_num p1 in
+      let>- p2 = get_num p2 in
+      Servpips_enc.fmod p1.expr p2.expr >- NumberType
   | FMod
   | BitwiseAnd
   | BitwiseOr
@@ -1120,6 +1291,32 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   | StrLen ->
       let>- le = get_string le in
       atom "to_real" <| (atom "str.len" <| le.expr) >- NumberType
+  | ToStringOp when !servpips_mode ->
+      let>- le = get_num le in
+      Servpips_enc.num_to_str le.expr >- StringType
+  | ToNumberOp when !servpips_mode ->
+      let>- le = get_string le in
+      Servpips_enc.str_to_num le.expr >- NumberType
+  | ToUint32Op when !servpips_mode ->
+      let>- le = get_num le in
+      Servpips_enc.to_uint32 le.expr >- NumberType
+  | ToInt32Op when !servpips_mode ->
+      let>- le = get_num le in
+      Servpips_enc.to_int32 le.expr >- NumberType
+  | ToUint16Op when !servpips_mode ->
+      let>- le = get_num le in
+      Servpips_enc.to_uint16 le.expr >- NumberType
+  | (M_floor | M_ceil | M_abs | M_sgn | M_round) when !servpips_mode ->
+      let>- le = get_num le in
+      let f =
+        match op with
+        | M_floor -> Servpips_enc.floor
+        | M_ceil -> Servpips_enc.ceil
+        | M_abs -> Servpips_enc.abs
+        | M_sgn -> Servpips_enc.sgn
+        | _ -> Servpips_enc.round
+      in
+      f le.expr >- NumberType
   | ToStringOp ->
       require_definition def_num2str;
       let>- le = get_num le in
@@ -1358,6 +1555,8 @@ let rec encode_logical_expression
   | ForAll (bt, e) ->
       encode_quantified_expr ~encode_expr:encode_logical_expression
         ~mk_quant:forall ~gamma ~llen_lvars ~list_elem_vars bt e
+  | FuncApp (name, les) when Servpips_functions.is_builtin name ->
+      Servpips_enc.builtin name (List.map f les)
   | FuncApp (name, les) ->
       let param_types =
         match Function_env.get_function_param_types name with
@@ -1598,11 +1797,19 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
   in
   let () = reset_solver () in
   with_necessary_usr_datatypes @@ fun () ->
-  let encoded_assertions, necessary_definitions = encode_assertions fs gamma in
+  let encoded_assertions, necessary_definitions =
+    if !servpips_mode then
+      try encode_assertions fs gamma with
+      | (Out_of_memory | Stack_overflow | Sys.Break) as e -> raise e
+      | Failure m | SMT_error m -> raise (SMT_encoding_failure m)
+      | e -> raise (SMT_encoding_failure (Printexc.to_string e))
+    else encode_assertions fs gamma
+  in
   let () = if !Config.dump_smt then Dump.dump fs gamma encoded_assertions in
   let () = emit_definitions ~emit:cmd necessary_definitions in
   let () = List.iter cmd encoded_assertions in
   L.verbose (fun fmt -> fmt "Reached SMT.");
+  incr query_count;
   let result = check !solver in
   L.verbose (fun m ->
       let r =
@@ -1614,6 +1821,7 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
       m "The solver returned: %s" r);
   let ret =
     match result with
+    | Unknown when !servpips_mode -> Some unknown_model
     | Unknown ->
         if !Config.under_approximation then raise SMT_unknown
         else
@@ -1730,6 +1938,11 @@ let lift_model
          v |> Option.iter (fun v -> subst_update x (Expr.Lit v)))
 
 let () = init_solver ()
+
+let servpips_enable () =
+  if not !servpips_mode then (
+    servpips_mode := true;
+    cmd (set_option ":encoding" "bmp"))
 
 let timeout_ms () = int_of_string_opt (String.trim !smt_timeout)
 

@@ -66,6 +66,9 @@ module Abductor = Engine.Abductor
     {!General.Servpips}. *)
 module Servpips = Engine.General.Servpips
 
+(** SERVPIPS builtin functions (interface I6). *)
+module Servpips_functions = Smt.Servpips_functions
+
 (* module Test262 = Test262_main *)
 
 (** Modules for logging (to the file log and the report database) *)

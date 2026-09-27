@@ -129,6 +129,8 @@ end = struct
   let to_assertions ?to_keep:_ (_ : t) : Asrt.t =
     raise (Failure "ERROR: to_assertions called for concrete executions")
 
+  let servpips_pc (_ : t) = ([], [])
+
   let run_spec
       (_ : MP.spec)
       (_ : string)

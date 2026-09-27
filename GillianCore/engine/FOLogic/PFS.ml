@@ -1,47 +1,103 @@
 open SVal
 module L = Logging
 
-type t = Expr.t Ext_list.t [@@deriving yojson]
+(* SERVPIPS (E19): the formulae are kept in an [Ext_list] (order preserved,
+   as upstream) together with an optional hash index of their multiplicities,
+   so that [mem] (and hence [extend]) is O(1) instead of a linear scan with
+   structural equality. The index is used only in SERVPIPS mode
+   ([Config.servpips_semantics]); it is maintained by [extend] and rebuilt
+   lazily after any other mutation (which just drops it). [mem] answers
+   exactly as the list scan. *)
+module H = Hashtbl.Make (struct
+  type t = Expr.t
 
-let init () : t = Ext_list.make ()
-let equal (pfs1 : t) (pfs2 : t) : bool = Ext_list.for_all2 Expr.equal pfs1 pfs2
-let to_list : t -> Expr.t list = Ext_list.to_list
-let of_list : Expr.t list -> t = Ext_list.of_list
+  let equal = Expr.equal
+  let hash = Hashtbl.hash
+end)
+
+type t = { lst : Expr.t Ext_list.t; mutable idx : int H.t option }
+
+let to_yojson (pfs : t) = Ext_list.to_yojson Expr.to_yojson pfs.lst
+
+let of_yojson j =
+  Result.map (fun lst -> { lst; idx = None }) (Ext_list.of_yojson Expr.of_yojson j)
+
+let mk lst = { lst; idx = None }
+let invalidate (pfs : t) = pfs.idx <- None
+let init () : t = mk (Ext_list.make ())
+
+let equal (pfs1 : t) (pfs2 : t) : bool =
+  Ext_list.for_all2 Expr.equal pfs1.lst pfs2.lst
+
+let to_list (pfs : t) : Expr.t list = Ext_list.to_list pfs.lst
+let of_list (l : Expr.t list) : t = mk (Ext_list.of_list l)
 
 let to_set pfs =
-  Ext_list.fold_left (fun acc el -> Expr.Set.add el acc) Expr.Set.empty pfs
+  Ext_list.fold_left (fun acc el -> Expr.Set.add el acc) Expr.Set.empty pfs.lst
 
-let mem (pfs : t) (f : Expr.t) = Ext_list.mem ~equal:Expr.equal f pfs
+let index (pfs : t) : int H.t =
+  match pfs.idx with
+  | Some h -> h
+  | None ->
+      let h = H.create (max 16 (2 * Ext_list.length pfs.lst)) in
+      Ext_list.iter
+        (fun e ->
+          H.replace h e (1 + Option.value (H.find_opt h e) ~default:0))
+        pfs.lst;
+      pfs.idx <- Some h;
+      h
+
+let mem_scan (pfs : t) (f : Expr.t) = Ext_list.mem ~equal:Expr.equal f pfs.lst
+
+let mem (pfs : t) (f : Expr.t) =
+  if !Config.servpips_semantics then H.mem (index pfs) f else mem_scan pfs f
 
 let extend (pfs : t) (a : Expr.t) : unit =
-  if not (mem pfs a) then Ext_list.add a pfs
+  if not (mem pfs a) then (
+    Ext_list.add a pfs.lst;
+    match pfs.idx with
+    | Some h -> H.replace h a (1 + Option.value (H.find_opt h a) ~default:0)
+    | None -> ())
 
-let clear (pfs : t) : unit = Ext_list.clear pfs
-let length (pfs : t) = Ext_list.length pfs
-let copy (pfs : t) : t = Ext_list.copy pfs
-let merge_into_left (pfs_l : t) (pfs_r : t) : unit = Ext_list.concat pfs_l pfs_r
+let clear (pfs : t) : unit =
+  Ext_list.clear pfs.lst;
+  invalidate pfs
+
+let length (pfs : t) = Ext_list.length pfs.lst
+
+let copy (pfs : t) : t =
+  { lst = Ext_list.copy pfs.lst; idx = Option.map H.copy pfs.idx }
+
+let merge_into_left (pfs_l : t) (pfs_r : t) : unit =
+  Ext_list.concat pfs_l.lst pfs_r.lst;
+  invalidate pfs_l;
+  invalidate pfs_r
 
 let set (pfs : t) (reset : Expr.t list) : unit =
   clear pfs;
   merge_into_left pfs (of_list reset)
 
 let substitution (subst : SESubst.t) (pfs : t) : unit =
-  Ext_list.map_inplace (SESubst.subst_in_expr ~partial:true subst) pfs
+  Ext_list.map_inplace (SESubst.subst_in_expr ~partial:true subst) pfs.lst;
+  invalidate pfs
 
 let subst_expr_for_expr (to_subst : Expr.t) (subst_with : Expr.t) (pfs : t) :
     unit =
-  Ext_list.map_inplace (Expr.subst_expr_for_expr ~to_subst ~subst_with) pfs
+  Ext_list.map_inplace
+    (Expr.subst_expr_for_expr ~to_subst ~subst_with)
+    pfs.lst;
+  invalidate pfs
 
 let lvars (pfs : t) : SS.t =
-  Ext_list.fold_left (fun ac a -> SS.union ac (Expr.lvars a)) SS.empty pfs
+  Ext_list.fold_left (fun ac a -> SS.union ac (Expr.lvars a)) SS.empty pfs.lst
 
 let alocs (pfs : t) : SS.t =
-  Ext_list.fold_left (fun ac a -> SS.union ac (Expr.alocs a)) SS.empty pfs
+  Ext_list.fold_left (fun ac a -> SS.union ac (Expr.alocs a)) SS.empty pfs.lst
 
 let clocs (pfs : t) : SS.t =
-  Ext_list.fold_left (fun ac a -> SS.union ac (Expr.clocs a)) SS.empty pfs
+  Ext_list.fold_left (fun ac a -> SS.union ac (Expr.clocs a)) SS.empty pfs.lst
 
-let pp = Fmt.vbox (Ext_list.pp ~sep:Fmt.cut Expr.pp)
+let pp fmt (pfs : t) = Fmt.vbox (Ext_list.pp ~sep:Fmt.cut Expr.pp) fmt pfs.lst
 
 let sort (p_formulae : t) : unit =
   let pfl = to_list p_formulae in
@@ -61,19 +117,40 @@ let sort (p_formulae : t) : unit =
   in
   set p_formulae (var_eqs @ llen_eqs @ others)
 
-let iter = Ext_list.iter
-let fold_left = Ext_list.fold_left
-let map_inplace = Ext_list.map_inplace
-let remove_duplicates pfs = Ext_list.remove_duplicates pfs
-let filter_map_stop = Ext_list.filter_map_stop
-let filter_stop_cond = Ext_list.filter_stop_cond
-let filter = Ext_list.filter
-let filter_map = Ext_list.filter_map
-let exists = Ext_list.exists
-let get_nth = Ext_list.nth
+let iter f (pfs : t) = Ext_list.iter f pfs.lst
+let fold_left f acc (pfs : t) = Ext_list.fold_left f acc pfs.lst
+
+let map_inplace f (pfs : t) =
+  Ext_list.map_inplace f pfs.lst;
+  invalidate pfs
+
+let remove_duplicates (pfs : t) =
+  Ext_list.remove_duplicates pfs.lst;
+  invalidate pfs
+
+let filter_map_stop f (pfs : t) =
+  let r = Ext_list.filter_map_stop f pfs.lst in
+  invalidate pfs;
+  r
+
+let filter_stop_cond ~keep ~cond (pfs : t) =
+  let r = Ext_list.filter_stop_cond ~keep ~cond pfs.lst in
+  invalidate pfs;
+  r
+
+let filter f (pfs : t) =
+  Ext_list.filter f pfs.lst;
+  invalidate pfs
+
+let filter_map f (pfs : t) =
+  Ext_list.filter_map f pfs.lst;
+  invalidate pfs
+
+let exists f (pfs : t) = Ext_list.exists f pfs.lst
+let get_nth n (pfs : t) = Ext_list.nth n pfs.lst
 
 let clean_up pfs =
-  Ext_list.filter
+  filter
     (fun (pf : Expr.t) ->
       match pf with
       | Expr.BinOp (Lit (Int x), BinOp.ILessThanEqual, UnOp (LstLen, _))

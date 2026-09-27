@@ -140,6 +140,8 @@ module Make (State : SState.S) = struct
   let to_assertions ?(to_keep : SS.t option) ({ state; _ } : t) : Asrt.t =
     State.to_assertions ?to_keep state
 
+  let servpips_pc ({ state; _ } : t) = State.servpips_pc state
+
   let evaluate_slcmd (prog : 'a MP.prog) (lcmd : SLCmd.t) (bi_state : t) :
       (t, err_t) Res_list.t =
     let open Syntaxes.List in

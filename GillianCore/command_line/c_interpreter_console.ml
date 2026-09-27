@@ -68,7 +68,25 @@ struct
     in
     run debug prog init_data
 
-  let exec files already_compiled debug outfile_opt no_heap entry_point () =
+  (* SERVPIPS: [exec --servpips] selects the SERVPIPS (ECMAScript-conformant)
+     concrete semantics (Config.servpips_semantics); no JSONL is written. *)
+  let servpips_semantics =
+    let doc =
+      "Use the SERVPIPS concrete semantics (ECMAScript StringToNumber, \
+       Number::toString, IEEE comparisons, Math.sign)."
+    in
+    Arg.(value & flag & info [ "servpips" ] ~doc)
+
+  let exec
+      files
+      already_compiled
+      debug
+      outfile_opt
+      no_heap
+      entry_point
+      servpips
+      () =
+    let () = if servpips then Config.servpips_semantics := true in
     let () = Config.current_exec_mode := Concrete in
     let () = Config.no_heap := no_heap in
     let () = Config.entry_point := entry_point in
@@ -87,7 +105,7 @@ struct
   let exec_t =
     Term.(
       const exec $ files $ already_compiled $ debug $ output_gil $ no_heap
-      $ entry_point)
+      $ entry_point $ servpips_semantics)
 
   let exec_info =
     let doc = "Concretely executes a file of the target language" in

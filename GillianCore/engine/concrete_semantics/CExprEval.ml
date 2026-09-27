@@ -118,10 +118,13 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
             round_nearest n
       in
       unary_num_thing lit f
+  | M_sgn when !Config.servpips_semantics -> unary_num_thing lit js_sign
   | M_sgn -> unary_num_thing lit (fun x -> copysign 1.0 x)
   | M_sin -> unary_num_thing lit sin
   | M_sqrt -> unary_num_thing lit sqrt
   | M_tan -> unary_num_thing lit tan
+  | ToStringOp when !Config.servpips_semantics ->
+      String (js_number_to_string (as_num lit))
   | ToStringOp ->
       let n = as_num lit in
       String (float_to_string_inner n)
@@ -129,6 +132,8 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | ToUint16Op -> unary_num_thing lit to_uint16
   | ToInt32Op -> unary_num_thing lit to_int32
   | ToUint32Op -> unary_num_thing lit to_uint32
+  | ToNumberOp when !Config.servpips_semantics ->
+      Num (js_string_to_number (as_str lit))
   | ToNumberOp ->
       let s = as_str lit in
       if s = "" then Num 0.
@@ -330,6 +335,30 @@ and evaluate_expr (store : CStore.t) (e : Expr.t) : CVal.M.t =
     | NOp (nop, le) -> evaluate_nop nop (List.map ee le)
     | EList ll -> evaluate_elist store ll
     | LstSub (e1, e2, e3) -> evaluate_lstsub store e1 e2 e3
+    | FuncApp (n, les) when Smt.Servpips_functions.is_builtin n -> (
+        (* SERVPIPS builtins: native ones are evaluated with their SMT-LIB
+           semantics; uninterpreted ones have no concrete semantics here *)
+        let lits = List.map ee les in
+        match Smt.Servpips_functions.lookup n with
+        | Some { smt = `Uf; _ } ->
+            raise
+              (Servpips.Path_end
+                 {
+                   status = "unsupported";
+                   reason = "uninterpreted builtin " ^ n ^ " in concrete execution";
+                 })
+        | _ -> (
+            match Smt.Servpips_functions.eval_concrete n lits with
+            | Some l -> l
+            | None ->
+                raise
+                  (Servpips.Path_end
+                     {
+                       status = "unsupported";
+                       reason =
+                         Fmt.str "builtin %s not evaluable on %a" n
+                           (Fmt.Dump.list Literal.pp) lits;
+                     })))
     | ALoc _
     | LVar _
     | ESet _
@@ -343,6 +372,7 @@ and evaluate_expr (store : CStore.t) (e : Expr.t) : CVal.M.t =
              "eval_expr concrete: aloc, lvar, set, exists, for all, case, \
               constructor or function application")
   with
+  | Servpips.Path_end _ as e -> raise e
   | TypeError msg -> raise (TypeError (msg ^ Fmt.str " in %a" Expr.pp e))
   | EvaluationError msg ->
       raise (EvaluationError (msg ^ Fmt.str " in %a" Expr.pp e))

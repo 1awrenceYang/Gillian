@@ -93,6 +93,18 @@ module Literal : sig
   (** Pretty-printer *)
   val pp : t Fmt.t
 
+  (** SERVPIPS (E7): IEEE semantic equality: numbers compare with IEEE [=]
+      (NaN is equal to nothing, [0 = -0]), lists element-wise, other
+      literals structurally. The derived [equal] (structural, NaN equal to
+      itself) is unchanged. *)
+  val ieee_equal : t -> t -> bool
+
+  (** SERVPIPS (E7): IEEE [<] / [<=] on two numbers (false when one is NaN);
+      [None] unless both are numbers. *)
+  val ieee_lt : t -> t -> bool option
+
+  val ieee_leq : t -> t -> bool option
+
   (** Returns the type of a literal *)
   val type_of : t -> Type.t
 
@@ -394,6 +406,10 @@ module Expr : sig
 
   (** [negate e] negates the expression, recursively *)
   val negate : t -> t
+
+  (** SERVPIPS: recognises the builtin functions whose result is a boolean
+      (set by [Smt.Servpips_functions]); used by {!is_boolean_expr}. *)
+  val bool_func_hook : (string -> bool) ref
 
   (** Returns if this expression is a boolean expression, recursively. *)
   val is_boolean_expr : t -> bool
@@ -1247,6 +1263,11 @@ module Prog_env : sig
 
   module Function_env : sig
     type t
+
+    (** SERVPIPS builtin functions, added to every function environment
+        (user functions with the same name take precedence). Set by
+        [Smt.Servpips_functions]. *)
+    val builtins : (string * Func.t) list ref
 
     val make' : (string, Func.t) Hashtbl.t -> t
     val make : ('a, 'b) Prog.t -> t

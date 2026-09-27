@@ -292,12 +292,18 @@ module Make (SMemory : SMemory.S) :
     let { pfs; gamma; _ } = state in
     match v with
     | Lit (Bool true) -> [ state ]
-    | Lit (Bool false) -> []
+    | Lit (Bool false) ->
+        Servpips.set_decision "reduction";
+        []
     | _ ->
         (* let t = time() in *)
         let red = Reduction.reduce_lexpr ~pfs ~gamma v in
-        if not @@ Expr.is_boolean_expr red then []
-        else if red = Lit (Bool false) then []
+        if not @@ Expr.is_boolean_expr red then (
+          Servpips.set_decision "typing";
+          [])
+        else if red = Lit (Bool false) then (
+          Servpips.set_decision "reduction";
+          [])
         else (
           PFS.extend pfs red;
           [ state ])
@@ -345,8 +351,12 @@ module Make (SMemory : SMemory.S) :
     L.verbose (fun m -> m "SState: sat_check: %a" Expr.pp v);
     let v = Reduction.reduce_lexpr ~pfs ~gamma v in
     if v = Lit (Bool true) then true
-    else if v = Lit (Bool false) then false
-    else if not @@ Expr.is_boolean_expr v then false
+    else if v = Lit (Bool false) then (
+      Servpips.set_decision "reduction";
+      false)
+    else if not @@ Expr.is_boolean_expr v then (
+      Servpips.set_decision "typing";
+      false)
     else
       let relevant_info = (Expr.pvars v, Expr.lvars v, Expr.locs v) in
       let result =
@@ -528,6 +538,9 @@ module Make (SMemory : SMemory.S) :
     else
       asrts_store @ SMemory.assertions heap @ asrts_pfs
       @ [ Types (Type_env.to_list_expr gamma) ]
+
+  let servpips_pc ({ pfs; gamma; _ } : t) =
+    (PFS.to_list pfs, Type_env.to_list_expr gamma)
 
   let evaluate_slcmd (_ : 'a MP.prog) (_ : SLCmd.t) (_ : t) :
       (t, err_t) Res_list.t =

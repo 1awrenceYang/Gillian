@@ -1,8 +1,9 @@
 (executable
  (name run_tests)
- (libraries alcotest gil_syntax_tests gillian))
+ (libraries alcotest gil_syntax_tests gillian gillian.engine gillian.smt gillian.utils))
 
 (rule
  (alias runtest)
+ (deps servpips_conformance.json)
  (action
   (run ./run_tests.exe -q --color=always)))

@@ -35,11 +35,19 @@ let simplify_pfs_and_gamma
   let fs_set = Expr.Set.of_list fs_lst in
   (fs_set, gamma, subst)
 
+(* SERVPIPS (E3): run a solver query; an encoding failure ends the current
+   configuration as [unsupported] (via [Servpips.encode_failure]). *)
+let servpips_check_sat fs gamma_tbl =
+  if !Smt.servpips_mode then
+    try Smt.check_sat fs gamma_tbl
+    with Smt.SMT_encoding_failure msg -> Servpips.encode_failure ~msg
+  else Smt.check_sat fs gamma_tbl
+
 let check_satisfiability_with_model (fs : Expr.t list) (gamma : Type_env.t) :
     SESubst.t option =
   let fs, gamma, subst = simplify_pfs_and_gamma fs gamma in
   let gamma_tbl = Type_env.as_hashtbl gamma in
-  let model = Smt.check_sat fs gamma_tbl in
+  let model = servpips_check_sat fs gamma_tbl in
   let lvars =
     List.fold_left
       (fun ac vs ->
@@ -61,6 +69,10 @@ let check_satisfiability_with_model (fs : Expr.t list) (gamma : Type_env.t) :
   let update x e = SESubst.put subst (LVar x) e in
   match model with
   | None -> None
+  | Some model when Smt.is_unknown_model model ->
+      (* SERVPIPS: unknown is treated as satisfiable, without a model *)
+      Servpips.note_unknown ~entailment:false;
+      Some subst
   | Some model -> (
       try
         Smt.lift_model model gamma_tbl update smt_vars;
@@ -71,7 +83,9 @@ let check_satisfiability_with_model (fs : Expr.t list) (gamma : Type_env.t) :
               m "Error when attempting to get SMT model: %s"
                 (Printexc.to_string e))
         in
-        None)
+        (* SERVPIPS (E3): the query was satisfiable; failing to lift the model
+           must not turn it into unsatisfiable *)
+        if !Smt.servpips_mode then Some subst else None)
 
 let check_satisfiability
     ?(matching = false)
@@ -85,7 +99,19 @@ let check_satisfiability
   let axioms = get_axioms fs gamma in
   let fs = Expr.Set.union fs axioms in
   if Expr.Set.is_empty fs then true
-  else if Expr.Set.mem Expr.false_ fs then false
+  else if Expr.Set.mem Expr.false_ fs then (
+    Servpips.set_decision "reduction";
+    false)
+  else if !Smt.servpips_mode then (
+    (* SERVPIPS (E3): unknown -> satisfiable (+ note); encoding failure ->
+       the configuration ends as unsupported. *)
+    match servpips_check_sat fs (Type_env.as_hashtbl gamma) with
+    | None ->
+        Servpips.set_decision "solver";
+        false
+    | Some m ->
+        if Smt.is_unknown_model m then Servpips.note_unknown ~entailment:false;
+        true)
   else
     let result =
       try Smt.is_sat fs (Type_env.as_hashtbl gamma)
@@ -199,9 +225,16 @@ let check_entailment
       let _ = Simplifications.simplify_pfs_and_gamma formulae gamma_left in
 
       let model =
-        Smt.check_sat
+        servpips_check_sat
           (Expr.Set.of_list (PFS.to_list formulae))
           (Type_env.as_hashtbl gamma)
+      in
+      (* SERVPIPS (E3): an unknown answer means "not entailed" (+ note) *)
+      let () =
+        match model with
+        | Some m when Smt.is_unknown_model m ->
+            Servpips.note_unknown ~entailment:true
+        | _ -> ()
       in
       let ret = Option.is_none model in
       L.(verbose (fun m -> m "Entailment returned %b" ret));

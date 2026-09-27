@@ -406,13 +406,26 @@ struct
    * Auxiliary Functions *
    * ******************* *)
 
+  (* SERVPIPS (E19): one-entry memo of the procedure lookup (the same
+     procedure is looked up several times per command); keyed on the program
+     and on the physical identity of the procedure name. *)
+  let get_cmd_memo : (annot MP.prog * string * (annot, int) Proc.t) option ref =
+    ref None
+
   let get_cmd (prog : annot MP.prog) (cs : Call_stack.t) (i : int) :
       string * (Annot.t * int Cmd.t) =
     let pid = Call_stack.get_cur_proc_id cs in
-    let proc = Prog.get_proc prog.prog pid in
+    let proc =
+      match !get_cmd_memo with
+      | Some (p, n, proc) when p == prog && n == pid && Servpips.enabled () ->
+          Some proc
+      | _ -> Prog.get_proc prog.prog pid
+    in
     let proc =
       match proc with
-      | Some proc -> proc
+      | Some proc ->
+          if Servpips.enabled () then get_cmd_memo := Some (prog, pid, proc);
+          proc
       | None -> raise (Failure ("Procedure " ^ pid ^ " does not exist."))
     in
     let annot, _, cmd = proc.proc_body.(i) in
@@ -472,6 +485,63 @@ struct
              loops: %a"
             pp_str_list end_ids pp_str_list start_ids
       | x :: r -> x :: loop_ids_to_frame_on_at_the_end r start_ids
+
+  (* ********************************************************** *
+   * SERVPIPS: path accounting helpers (E1, E3, E9, E13)          *
+   * ********************************************************** *)
+
+  (* pc and types of a state (cheap; no heap conversion) *)
+  let sp_pc (state : State.t) =
+    try State.servpips_pc state with _ -> ([], [])
+
+  (* Report the end of a configuration. Without --servpips (e.g. an extern
+     raising [Servpips.Path_end] in exec mode), print a note to stderr. *)
+  let servpips_end ?outcome (state : State.t) ~status ~reason () =
+    if Servpips.enabled () then
+      let pc, types = sp_pc state in
+      Servpips.record_end ~status ~reason ?outcome ~pc ~types ()
+    else Printf.eprintf "SERVPIPS: path end (%s): %s\n%!" status reason
+
+  (* E13: the configuration [state] has no successor. [extra] is the formula
+     the command tried to assume ([true] when none): if [pc /\ extra] is
+     satisfiable, the configuration vanished (a bug: end{error, vanished});
+     otherwise the leaf is infeasible. *)
+  let servpips_audit (state : State.t) ~(extra : Expr.t) ~(detail : string) =
+    if Servpips.enabled () then
+      let pc, types = sp_pc state in
+      match State.assume_a (State.copy state) [ extra ] with
+      | Some _ -> Servpips.record_vanished ~detail ~pc ~types ()
+      | None -> Servpips.record_infeasible ()
+      | exception Servpips.Path_end { status; reason } ->
+          Servpips.record_end ~status ~reason:("audit: " ^ reason) ~pc ~types
+            ()
+      | exception ((Stack_overflow | Out_of_memory | Sys.Break) as e) ->
+          raise e
+      | exception e ->
+          let msg = Servpips.exn_msg e in
+          Servpips.internal_exception ~msg;
+          Servpips.record_end ~status:"error"
+            ~reason:("audit: exception: " ^ msg)
+            ~pc ~types ()
+
+  (* Is the path condition of [state] (definitely) unsatisfiable? An unknown
+     answer or a failure counts as satisfiable. *)
+  let servpips_pc_unsat (state : State.t) =
+    match State.assume_a (State.copy state) [ Expr.true_ ] with
+    | Some _ -> false
+    | None -> true
+    | exception ((Stack_overflow | Out_of_memory | Sys.Break) as e) -> raise e
+    | exception _ -> false
+
+  (* Does an exception message come from an unsupported construct (e.g. the
+     SMT encoding's "DEATH" failures)? *)
+  let servpips_unsupported_msg msg =
+    let contains sub =
+      let n = String.length sub and m = String.length msg in
+      let rec go i = i + n <= m && (String.sub msg i n = sub || go (i + 1)) in
+      go 0
+    in
+    contains "DEATH" || contains "not supported yet"
 
   (* ************** *
    * Main Functions *
@@ -553,17 +623,30 @@ struct
           L.normal (fun m -> m "%s" msg);
           Res_list.error_with err
 
+    (* SERVPIPS (E13): a side of a logic branch/if dropped by the state (its
+       condition was found unsatisfiable) is reported as a prune event when the
+       condition mentions logical variables; [state] is unmodified. *)
+    let servpips_prune_lcmd (state : State.t) (cond : Expr.t) ~kept =
+      if Servpips.enabled () && not (SS.is_empty (Expr.lvars cond)) then
+        let pc, types = sp_pc state in
+        Servpips.record_prune ~guard:cond ~guard_orig:cond ~kept
+          ~by:!Servpips.last_decision ~pc ~types ()
+
     let eval_branch fof state =
       let state' = State.copy state in
       let left_states =
         match State.assume_a state [ fof ] with
         | Some state -> Res_list.return state
-        | None -> Res_list.vanish
+        | None ->
+            servpips_prune_lcmd state fof ~kept:"else";
+            Res_list.vanish
       in
       let right_states =
         match State.assume_a state' [ Expr.Infix.not fof ] with
         | Some state -> Res_list.return state
-        | None -> Res_list.vanish
+        | None ->
+            servpips_prune_lcmd state' fof ~kept:"then";
+            Res_list.vanish
       in
       left_states @ right_states
 
@@ -611,12 +694,16 @@ struct
           let then_states =
             match State.assume_a state [ e ] with
             | Some state -> eval_lcmds prog lcmds_t ~annot state
-            | None -> Res_list.vanish
+            | None ->
+                servpips_prune_lcmd state e ~kept:"else";
+                Res_list.vanish
           in
           let else_states =
             match State.assume_a state' [ ne ] with
             | Some state -> eval_lcmds prog lcmds_e ~annot state
-            | None -> Res_list.vanish
+            | None ->
+                servpips_prune_lcmd state' e ~kept:"then";
+                Res_list.vanish
           in
           then_states @ else_states
 
@@ -1257,10 +1344,48 @@ struct
         in
         L.verbose (fun fmt ->
             fmt "Evaluated expressions: %a, %a" Val.pp vt Val.pp vf);
+        (* SERVPIPS (E13): report a dropped branch side as a [prune] event
+           when the guard mentions logical variables. Must be called before
+           [state] is modified by [State.assume]. *)
+        let servpips_prune ~kept ~by =
+          if Servpips.enabled () then
+            let guard_orig =
+              (* substitute only the program variables of the guard *)
+              let store = State.get_store state in
+              let store_subst =
+                SVal.SESubst.init
+                  (SS.fold
+                     (fun x acc ->
+                       match Store.get store x with
+                       | Some v -> (Expr.PVar x, Val.to_expr v) :: acc
+                       | None -> acc)
+                     (Expr.pvars e) [])
+              in
+              SVal.SESubst.subst_in_expr store_subst ~partial:true e
+            in
+            let guard = Val.to_expr vt in
+            if
+              (not (SS.is_empty (Expr.lvars guard_orig)))
+              || not (SS.is_empty (Expr.lvars guard))
+            then
+              (* a decision that holds without any context needs no pc *)
+              let context_free =
+                match Reduction.reduce_lexpr guard_orig with
+                | Lit (Bool b) -> b = (kept = "then")
+                | _ -> false
+                | exception _ -> false
+              in
+              let pc, types = if context_free then ([], []) else sp_pc state in
+              Servpips.record_prune ~guard ~guard_orig ~kept ~by ~pc ~types ()
+        in
         let can_put_t, can_put_f =
           match lvt with
-          | Some (Bool true) -> (true, false)
-          | Some (Bool false) -> (false, true)
+          | Some (Bool true) ->
+              servpips_prune ~kept:"then" ~by:"reduction";
+              (true, false)
+          | Some (Bool false) ->
+              servpips_prune ~kept:"else" ~by:"reduction";
+              (false, true)
           | _ ->
               let vtx = State.sat_check state vt in
               let vfx =
@@ -1268,6 +1393,12 @@ struct
                 | false -> true
                 | true -> State.sat_check state vf
               in
+              (match (vtx, vfx) with
+              | true, false ->
+                  servpips_prune ~kept:"then" ~by:!Servpips.last_decision
+              | false, true ->
+                  servpips_prune ~kept:"else" ~by:!Servpips.last_decision
+              | _ -> ());
               (vtx, vfx)
         in
         let sp_t, sp_f =
@@ -1280,11 +1411,17 @@ struct
           | true, true ->
               let state_t = State.copy state in
               let unfolded_trues = State.assume ~unfold:true state_t vt in
+              let by_t = !Servpips.last_decision in
               let state_f = State.copy state in
               let unfolded_falses = State.assume ~unfold:true state_f vf in
+              let by_f = !Servpips.last_decision in
               let utlen, uflen =
                 (List.length unfolded_trues, List.length unfolded_falses)
               in
+              (match (utlen, uflen) with
+              | 0, n when n > 0 -> servpips_prune ~kept:"else" ~by:by_t
+              | n, 0 when n > 0 -> servpips_prune ~kept:"then" ~by:by_f
+              | _ -> ());
               if utlen = 0 || uflen = 0 || utlen + uflen = 2 then
                 ( List.map (fun x -> (x, j)) unfolded_trues,
                   List.map (fun x -> (x, k)) unfolded_falses )
@@ -1722,7 +1859,8 @@ struct
         else Nothing
       in
       (* if !Config.stats then Statistics.exec_cmds := !Statistics.exec_cmds + 1; *)
-      MP.update_coverage prog proc_name i;
+      (* SERVPIPS (E19): coverage counts are not used in SERVPIPS mode *)
+      if not (Servpips.enabled ()) then MP.update_coverage prog proc_name i;
 
       log_configuration annot_cmd state cs i b_counter branch_case proc_name
       |> Option.iter (fun report_id ->
@@ -1771,18 +1909,27 @@ struct
   let simplify state =
     snd (State.simplify ~save:true ~kill_new_lvars:true state)
 
-  (* SERVPIPS: emit the [end] event of a configuration stopped by
-     [Servpips.Path_end]; [state] is the state before the command. *)
-  let servpips_path_end (state : State.t) ~status ~reason =
+  (* SERVPIPS (E13): audit a configuration that produced no successor. *)
+  let servpips_no_successor (prog : annot MP.prog) state cs i ~what =
     if Servpips.enabled () then
-      let pc, types =
-        try
-          Servpips.pc_and_types_of_asrt
-            (State.to_assertions ~to_keep:Containers.SS.empty state)
-        with _ -> ([], [])
+      let pid, (_, cmd) = get_cmd prog cs i in
+      let subst e =
+        let store_subst = Store.to_ssubst (State.get_store state) in
+        SVal.SESubst.subst_in_expr store_subst ~partial:true e
       in
-      Servpips.emit_end ~status ~reason ~pc ~types ()
-    else Printf.eprintf "SERVPIPS: path end (%s): %s\n%!" status reason
+      let extra =
+        try
+          match cmd with
+          | Logic (Assume f) -> subst f
+          | Logic (AssumeType (e, t)) ->
+              Expr.BinOp (UnOp (TypeOf, subst e), Equal, Lit (Type t))
+          | _ -> Expr.true_
+        with _ -> Expr.true_
+      in
+      let detail =
+        Fmt.str "%s at %s:%d: @[<h>%a@]" what pid i Cmd.pp_indexed cmd
+      in
+      servpips_audit state ~extra ~detail
 
   let protected_evaluate_cmd
       (prog : annot MP.prog)
@@ -1798,17 +1945,42 @@ struct
       (branch_path : branch_path)
       (branch_case : branch_case option)
       laction_fuel : CConf.t list =
+    let sp = Servpips.enabled () in
     let states =
       match get_cmd prog cs i with
-      | _, (_, LAction _) -> simplify state
+      | _, (_, LAction _) ->
+          if sp then (
+            match simplify state with
+            | [] ->
+                servpips_no_successor prog state cs i
+                  ~what:"simplification before an action removed the state";
+                []
+            | states -> states
+            | exception ((Stack_overflow | Out_of_memory | Sys.Break) as e) ->
+                raise e
+            | exception e ->
+                let msg = Servpips.exn_msg e in
+                Servpips.internal_exception ~msg;
+                servpips_end state ~status:"error"
+                  ~reason:("exception in simplification: " ^ msg)
+                  ();
+                [])
+          else simplify state
       | _ -> [ state ]
     in
     List.concat_map
       (fun state ->
         let last_known_loc = ref last_known_loc in
         try
-          evaluate_cmd prog state cs iframes prev prev_loop_ids i b_counter
-            last_known_loc report_id_ref branch_path branch_case laction_fuel
+          let confs =
+            evaluate_cmd prog state cs iframes prev prev_loop_ids i b_counter
+              last_known_loc report_id_ref branch_path branch_case laction_fuel
+          in
+          (match confs with
+          | [] when sp ->
+              servpips_no_successor prog state cs i ~what:"no successor"
+          | _ -> ());
+          confs
         with
         | Interpreter_error (errors, error_state) ->
             [
@@ -1840,7 +2012,27 @@ struct
         | Servpips.Path_end { status; reason } ->
             (* SERVPIPS: an extern (or engine hook) ended this configuration.
                Report it as an [end] event and drop the configuration. *)
-            servpips_path_end state ~status ~reason;
+            servpips_end state ~status ~reason ();
+            []
+        | Servpips.Path_end_outcome { status; reason; outcome } ->
+            servpips_end ?outcome state ~status ~reason ();
+            []
+        | Servpips.Assume_failed f ->
+            (* SERVPIPS: an extern could not assume [f] *)
+            servpips_audit state ~extra:f
+              ~detail:(Fmt.str "assume failed: @[<h>%a@]" Expr.pp f);
+            []
+        | (Stack_overflow | Out_of_memory | Sys.Break) as e -> raise e
+        | e when sp ->
+            (* SERVPIPS (E3): any other exception ends this configuration
+               only; sibling configurations continue. *)
+            let msg = Servpips.exn_msg e in
+            let status =
+              if servpips_unsupported_msg msg then "unsupported" else "error"
+            in
+            Servpips.internal_exception ~msg;
+            if servpips_pc_unsat state then Servpips.record_infeasible ()
+            else servpips_end state ~status ~reason:("exception: " ^ msg) ();
             [])
       states
 
@@ -2158,6 +2350,9 @@ struct
            silently dropped and the run still reports Success). *)
         Printf.eprintf "SERVPIPS: MAX BRANCHING STOP (%d) in %s at cmd %d\n%!"
           b_counter proc_name i;
+        (if Servpips.enabled () then
+           let pc, types = sp_pc state in
+           Servpips.record_truncated ~pc ~types ());
         L.set_previous prev_cmd_report_id;
         L.(
           verbose (fun m ->
@@ -2177,6 +2372,21 @@ struct
           cconf
         in
         let proc = Call_stack.get_cur_proc_id callstack in
+        if Servpips.enabled () && not !Config.debug then (
+          (* SERVPIPS (E1): stream the end event and drop the final state *)
+          let reason =
+            Fmt.str "%s:%d: @[<h>%a@]" proc proc_idx
+              (Fmt.list ~sep:(Fmt.any "; ") pp_err_t)
+              errors
+          in
+          (* an error on a path whose condition is unsatisfiable is not a
+             real execution: count it as an infeasible leaf *)
+          if servpips_pc_unsat error_state then Servpips.record_infeasible ()
+          else servpips_end error_state ~status:"error" ~reason ();
+          continue_or_pause rest_confs
+            (fun ?selector () -> f rest_confs selector results)
+            eval_step_state)
+        else
         let result =
           Exec_res.RFail { proc; proc_idx; error_state; errors; loc }
         in
@@ -2192,6 +2402,20 @@ struct
       let finish (cconf : CConf.finish) eval_step_state =
         let { results; rest_confs; f; _ } = eval_step_state in
         let { flag; ret_val; final_state; branch_path; loc; _ } = cconf in
+        if Servpips.enabled () && not !Config.debug then (
+          (* SERVPIPS (E1): stream the end event and drop the final state *)
+          let status, reason =
+            match flag with
+            | Flag.Normal -> ("returned", "finished")
+            | Flag.Error ->
+                ("threw", Fmt.str "uncaught exception: %a" Val.pp ret_val)
+            | Flag.Bug -> ("error", "bug flag")
+          in
+          servpips_end final_state ~status ~reason ();
+          continue_or_pause rest_confs
+            (fun ?selector () -> f rest_confs selector results)
+            eval_step_state)
+        else
         let result =
           Exec_res.RSucc
             { flag; ret_val; final_state; last_report = L.Parent.get (); loc }
