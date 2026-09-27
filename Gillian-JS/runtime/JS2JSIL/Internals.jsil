@@ -21,9 +21,21 @@ proc i__toLength (v) {
 
 (* *** ISPRIMITIVE *** *)
 
+(*
+ * SERVPIPS (decision D-R2-2): with --servpips, a symbolic value whose type
+ * is a union forks only primitive / object (/ non-JS value) instead of once
+ * per type: extern servpips_conv returns the result, or none (inactive, or
+ * a literal / a value of known type: the procedure continues as upstream).
+ * The same hook is used by i__toBoolean, i__toString, i__abstractEquality.
+ *)
 proc i__isPrimitive (v) {
 
-	     goto [(v = undefined)] rt c1;
+	     sp := extern servpips_conv ("isPrimitive", v);
+	     goto [sp = none] c0 spr;
+	spr: ret := sp;
+	     return;
+
+	c0:  goto [(v = undefined)] rt c1;
 	c1:  goto [(v = null)] rt c2;
 	c2:	 tv := typeOf v;
 	     goto [(tv = Bool)] rt c3;
@@ -914,6 +926,11 @@ proc i__putValue (v, w) {
 (* *** TOBOOLEAN *** *)
 
 proc i__toBoolean (v) {
+			sp := extern servpips_conv ("toBoolean", v);
+			goto [sp = none] iu spr;
+	spr:	ret := sp;
+			goto rlab;
+
 	iu:		goto [v = undefined] undef in;
 	undef:	ret := false;
 			goto rlab;
@@ -1032,6 +1049,10 @@ proc i__toUint16 (v) {
 
 proc i__toString (v) {
 			v := v;
+			sp := extern servpips_conv ("toString", v);
+			goto [sp = none] iu spr;
+	spr:	ret := sp;
+			goto rlab;
 
 	iu:		 goto [v = undefined] undef in;
 	undef: ret := "undefined";
@@ -1292,7 +1313,12 @@ proc i__typeOf (v) {
 (* **************** *)
 
 proc i__abstractEquality (v1, v2) {
-			tv1 := typeOf v1;
+			sp := extern servpips_conv ("looseEq", v1, v2);
+			goto [sp = none] up spr;
+	spr:	ret := sp;
+			goto rlab;
+
+	up:		tv1 := typeOf v1;
 			tv2 := typeOf v2;
 
 			goto [(tv1 = tv2) or (tv1 = tv2) or (tv2 = tv1)] same diff;

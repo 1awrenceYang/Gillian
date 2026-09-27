@@ -51,6 +51,10 @@ let builtin_names : (string * int option) list =
     ("JSON.quote", Some 1);
     ("js.num2str", Some 1);
     ("js.toUint32", Some 1);
+    (* decision D-R2-2: conversions of values of any JS type *)
+    ("js.tostring", Some 1);
+    ("js.toboolean", Some 1);
+    ("js.looseeq", Some 2);
     (* native GIL operations *)
     ("and", None);
     ("or", None);
@@ -823,8 +827,22 @@ module Make (E : X.ENV) = struct
           | "toString", [ e ] -> Some (UnOp (ToStringOp, e))
           | _ -> None
         in
+        let defined =
+          match Gillian.Servpips_functions.lookup name with
+          | Some { smt = `Defined; _ } -> true
+          | _ -> false
+        in
         match native with
         | Some e -> [ X.Return (st, guard (fun () -> S.eval_expr st e)) ]
+        | None when defined ->
+            (* evaluated on literal arguments (both modes); the conversion
+               of a value of known type is simplified *)
+            let e = Expr.FuncApp (name, es) in
+            let v = guard (fun () -> S.eval_expr st e) in
+            if (not E.symbolic) && V.to_literal v = None then
+              fail_uns "builtin %s not evaluable on %s" name
+                (Fmt.to_to_string (Fmt.list ~sep:Fmt.comma V.pp) fargs)
+            else [ X.Return (st, v) ]
         | None ->
             let e = Expr.FuncApp (name, es) in
             if not E.symbolic then
@@ -1244,6 +1262,196 @@ module Make (E : X.ENV) = struct
                 [ X.Return (st, r) ])
         in
         zero_branches @ nonzero_branches
+
+  (* ------------------------------------------------------------------ *)
+  (* servpips_conv(op, v [, w])  (JSIL runtime; decision D-R2-2)         *)
+  (* ------------------------------------------------------------------ *)
+
+  (* [typeOf e = t] *)
+  let t_is e (t : Type.t) = Expr.BinOp (UnOp (TypeOf, e), Equal, Lit (Type t))
+
+  let disj = function
+    | [] -> Expr.false_
+    | e :: es -> List.fold_left (fun a b -> Expr.BinOp (a, Or, b)) e es
+
+  let prim_types : Type.t list =
+    [ UndefinedType; NullType; BooleanType; NumberType; StringType ]
+
+  (* [e] is a JS primitive value / a JS object / a JS value *)
+  let prim_f e = disj (List.map (t_is e) prim_types)
+  let obj_f e = t_is e ObjectType
+  let js_f e = disj (List.map (t_is e) (prim_types @ [ ObjectType ]))
+  let not_ e = Expr.UnOp (Not, e)
+
+  (* Which sides of [f] are satisfiable under the path condition of [st]
+     (the path condition itself is satisfiable: a live configuration). A
+     dropped side is reported as a [prune] event (E13), like a dropped
+     side of a JSIL goto. *)
+  let split (st : st) (f : Expr.t) : bool * bool =
+    let prune kept =
+      let pc, types = pc_types st in
+      Servpips.record_prune ~guard:f ~guard_orig:f ~kept
+        ~by:!Servpips.last_decision ~pc ~types ()
+    in
+    if not (sat st [ not_ f ]) then (
+      prune "then";
+      (true, false))
+    else if not (sat st [ f ]) then (
+      prune "else";
+      (false, true))
+    else (true, true)
+
+  (* the branch where [f] holds (resp. fails): [st] itself when the other
+     side is unsatisfiable, a copy with [f] (resp. [not f]) assumed
+     otherwise *)
+  let side (st : st) (f : Expr.t) ~(both : bool) : st option =
+    if both then assume_all st [ f ] else Some st
+
+  let conv (st : st) (args : vt list) : outcome list =
+    let none = lit Literal.Nono in
+    let pass st = X.Return (st, none) in
+    let op, vs =
+      match args with
+      | op :: vs -> (string_arg "op" op, vs)
+      | [] -> fail_err "missing operation"
+    in
+    let known v =
+      V.to_literal v <> None
+      || (match guard (fun () -> S.get_type st v) with
+         | Some _ -> true
+         | None -> false)
+    in
+    let fn name es = v_of_expr (Expr.FuncApp (name, es)) in
+    (* [on_prim] where [e] is primitive, [on_other] where it is not; one
+       branch per satisfiable side *)
+    let by_prim st e ~on_prim ~on_other =
+      let p = prim_f e in
+      let can_p, can_np = split st p in
+      let both = can_p && can_np in
+      let bp =
+        if can_p then
+          match side st p ~both with
+          | Some st -> [ on_prim st ]
+          | None -> []
+        else []
+      in
+      let bn =
+        if can_np then
+          match side st (not_ p) ~both with
+          | Some st -> on_other st
+          | None -> []
+        else []
+      in
+      bp @ bn
+    in
+    (* The builtins only save forks where the value may be a primitive
+       other than undefined / null: otherwise (e.g. an optional object,
+       undefined or an object) the upstream procedure forks at most on
+       undefined / null / object, with plain type atoms. *)
+    let nn_prim e =
+      Expr.BinOp
+        ( prim_f e,
+          And,
+          not_ (Expr.BinOp (t_is e UndefinedType, Or, t_is e NullType)) )
+    in
+    let only_nullish v = not (sat st [ nn_prim (e_of v) ]) in
+    match (op, vs) with
+    | ("isPrimitive" | "toString" | "toBoolean"), [ v ] when known v -> [ pass st ]
+    | ("isPrimitive" | "toString" | "toBoolean"), [ v ] when only_nullish v ->
+        [ pass st ]
+    | "isPrimitive", [ v ] ->
+        (* primitive: true; object: false; anything else: upstream *)
+        let e = e_of v in
+        by_prim st e
+          ~on_prim:(fun st -> X.Return (st, vbool true))
+          ~on_other:(fun st ->
+            let o = obj_f e in
+            let can_o, can_x = split st o in
+            let both = can_o && can_x in
+            (if can_o then
+               match side st o ~both with
+               | Some st -> [ X.Return (st, vbool false) ]
+               | None -> []
+             else [])
+            @
+            if can_x then
+              match side st (not_ o) ~both with
+              | Some st -> [ pass st ]
+              | None -> []
+            else [])
+    | "toString", [ v ] ->
+        (* primitive: js.tostring(v); otherwise upstream (ToPrimitive of an
+           object calls its methods) *)
+        let e = e_of v in
+        let str_only st = not (sat st [ not_ (t_is e StringType) ]) in
+        by_prim st e
+          ~on_prim:(fun st ->
+            (* a string is its own ToString *)
+            if str_only st then X.Return (st, v)
+            else X.Return (st, fn "js.tostring" [ e ]))
+          ~on_other:(fun st -> [ pass st ])
+    | "toBoolean", [ v ] ->
+        (* any JS value: js.toboolean(v) (objects are true, no method is
+           called); a non-JS value: upstream *)
+        let e = e_of v in
+        let j = js_f e in
+        let can_j, can_nj = split st j in
+        let both = can_j && can_nj in
+        (if can_j then
+           match side st j ~both with
+           | Some st -> [ X.Return (st, fn "js.toboolean" [ e ]) ]
+           | None -> []
+         else [])
+        @
+        if can_nj then
+          match side st (not_ j) ~both with
+          | Some st -> [ pass st ]
+          | None -> []
+        else []
+    | "looseEq", [ a; b ] -> (
+        let ea = e_of a and eb = e_of b in
+        let nullish_lit v =
+          match V.to_literal v with
+          | Some (Null | Undefined) -> true
+          | _ -> false
+        in
+        let nonfinite_lit v =
+          match V.to_literal v with
+          | Some (Num f) -> not (Float.is_finite f)
+          | _ -> false
+        in
+        match () with
+        | _ when V.to_literal a <> None && V.to_literal b <> None -> [ pass st ]
+        | _ when nullish_lit a || nullish_lit b ->
+            (* x == null: x is null or undefined (an object is not; no
+               method is called) *)
+            let o = if nullish_lit a then eb else ea in
+            let r =
+              Expr.BinOp
+                ( BinOp (o, Equal, Lit Null),
+                  Or,
+                  BinOp (o, Equal, Lit Undefined) )
+            in
+            [ X.Return (st, guard (fun () -> S.eval_expr st r)) ]
+        | _ when nonfinite_lit a || nonfinite_lit b -> [ pass st ]
+        | _ when known a && known b -> [ pass st ]
+        | _ ->
+            (* both primitive: js.looseeq(a, b); otherwise upstream *)
+            let g = Expr.BinOp (prim_f ea, And, prim_f eb) in
+            let can_g, can_ng = split st g in
+            let both = can_g && can_ng in
+            (if can_g then
+               match side st g ~both with
+               | Some st -> [ X.Return (st, fn "js.looseeq" [ ea; eb ]) ]
+               | None -> []
+             else [])
+            @
+            if can_ng then
+              match side st (not_ g) ~both with
+              | Some st -> [ pass st ]
+              | None -> []
+            else [])
+    | _ -> fail_err "invalid operation %s/%d" op (List.length vs)
 end
 
 (* ------------------------------------------------------------------------ *)
@@ -1589,6 +1797,37 @@ let rejected_h : X.handler =
         M.rejected st args);
   }
 
+(* servpips_conv: called by every ToBoolean / ToString / ToPrimitive / ==
+   of the JSIL runtime; inactive (none: the runtime continues as upstream)
+   without --servpips, under concrete execution and on literals or values of
+   known type, decided before the functor is applied. *)
+let conv_h : X.handler =
+  {
+    X.run =
+      (fun (type st vt)
+           (module E : X.ENV with type st = st and type vt = vt)
+           (st : st)
+           (args : vt list) ->
+        let pass = [ X.Return (st, E.Val.from_literal Literal.Nono) ] in
+        let is_lit v = E.Val.to_literal v <> None in
+        let known v =
+          is_lit v
+          ||
+          match E.State.get_type st v with
+          | Some _ -> true
+          | None -> false
+          | exception _ -> false
+        in
+        if (not (Servpips.enabled ())) || not E.symbolic then pass
+        else
+          match args with
+          | [ _; v ] when known v -> pass
+          | [ _; a; b ] when is_lit a && is_lit b -> pass
+          | _ ->
+              let module M = Make (E) in
+              M.conv st args);
+  }
+
 let initialised = ref false
 
 let init () =
@@ -1609,6 +1848,7 @@ let init () =
         ("servpips_arith", arith_h);
         ("servpips_tonumber", tonumber_h);
         ("servpips_rejected", rejected_h);
+        ("servpips_conv", conv_h);
         ("servpips_resolver", resolver_h);
         ("servpips_lazykey", lazykey_h);
         ("servpips_model_miss", model_miss_h);

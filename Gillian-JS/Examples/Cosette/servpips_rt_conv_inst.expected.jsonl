@@ -1,0 +1,81 @@
+{"ev": "decl", "lvar": "#lvar_0", "name": "p", "sort": "JS", "kind": "input", "parent": null, "key": null, "parent_lvar": null, "parent_aloc": null, "shape": "P", "open": null, "site": null, "k": null}
+{"ev": "note", "code": "ok", "msg": "'12' String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'12' Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'12' ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'12' =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'12' ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == \"12\")", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", "12"]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Str"]]}
+{"ev": "note", "code": "ok", "msg": "'' String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'' Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'' ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'' =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'' ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == \"\")", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", ""]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Str"]]}
+{"ev": "note", "code": "ok", "msg": "'1' String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'1' Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'1' ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'1' =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'1' ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == \"1\")", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", "1"]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Str"]]}
+{"ev": "note", "code": "ok", "msg": "' 12 ' String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "' 12 ' Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "' 12 ' ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "' 12 ' =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "' 12 ' ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == \" 12 \")", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", " 12 "]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Str"]]}
+{"ev": "note", "code": "ok", "msg": "'abc' String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'abc' Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'abc' ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'abc' =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "'abc' ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == \"abc\")", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", "abc"]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Str"]]}
+{"ev": "note", "code": "ok", "msg": "12 String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "12 Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "12 ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "12 =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "12 ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == 12.)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", 12.0]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Num"]]}
+{"ev": "note", "code": "ok", "msg": "0 String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "0 Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "0 ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "0 =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "0 ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == 0.)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", 0.0]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Num"]]}
+{"ev": "note", "code": "ok", "msg": "1 String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "1 Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "1 ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "1 =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "1 ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == 1.)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", 1.0]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Num"]]}
+{"ev": "note", "code": "ok", "msg": "-7 String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "-7 Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "-7 ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "-7 =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "-7 ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == -7.)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", -7.0]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Num"]]}
+{"ev": "note", "code": "ok", "msg": "true String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "true Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "true ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "true =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "true ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == true)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Bool", true]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Bool"]]}
+{"ev": "note", "code": "ok", "msg": "false String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "false Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "false ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "false =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "false ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == false)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Bool", false]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Bool"]]}
+{"ev": "note", "code": "ok", "msg": "null String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "null Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "null ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "null =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "null ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == null)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Null"]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Null"]]}
+{"ev": "note", "code": "ok", "msg": "undefined String", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "undefined Boolean", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "undefined ==12", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "undefined =='12'", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "note", "code": "ok", "msg": "undefined ==true", "site": null, "data": {"t": "val", "e": {"pp": "null", "ast": ["Lit", ["Null"]]}}}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "(#lvar_0 == undefined)", "ast": ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Undefined"]]]}], "types": [[{"pp": "#lvar_0", "ast": ["LVar", "#lvar_0"]}, "Undefined"]]}
+{"ev": "end", "status": "returned", "reason": "finished", "outcome": null, "pc": [{"pp": "((((typeOf #lvar_0) == Bool) or ((typeOf #lvar_0) == Num)) or ((typeOf #lvar_0) == Str))", "ast": ["BinOp", ["BinOp", ["BinOp", ["UnOp", ["TypeOf"], ["LVar", "#lvar_0"]], ["Equal"], ["Lit", ["Type", ["BooleanType"]]]], ["Or"], ["BinOp", ["UnOp", ["TypeOf"], ["LVar", "#lvar_0"]], ["Equal"], ["Lit", ["Type", ["NumberType"]]]]], ["Or"], ["BinOp", ["UnOp", ["TypeOf"], ["LVar", "#lvar_0"]], ["Equal"], ["Lit", ["Type", ["StringType"]]]]]}, {"pp": "(! ((typeOf #lvar_0) == List))", "ast": ["UnOp", ["Not"], ["BinOp", ["UnOp", ["TypeOf"], ["LVar", "#lvar_0"]], ["Equal"], ["Lit", ["Type", ["ListType"]]]]]}, {"pp": "(! (#lvar_0 == empty))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Empty"]]]]}, {"pp": "(! (#lvar_0 == \"12\"))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", "12"]]]]}, {"pp": "(! (#lvar_0 == \"\"))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", ""]]]]}, {"pp": "(! (#lvar_0 == \"1\"))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", "1"]]]]}, {"pp": "(! (#lvar_0 == \" 12 \"))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", " 12 "]]]]}, {"pp": "(! (#lvar_0 == \"abc\"))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["String", "abc"]]]]}, {"pp": "(! (#lvar_0 == 12.))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", 12.0]]]]}, {"pp": "(! (#lvar_0 == 0.))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", 0.0]]]]}, {"pp": "(! (#lvar_0 == 1.))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", 1.0]]]]}, {"pp": "(! (#lvar_0 == -7.))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Num", -7.0]]]]}, {"pp": "(! (#lvar_0 == true))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Bool", true]]]]}, {"pp": "(! (#lvar_0 == false))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Bool", false]]]]}, {"pp": "(! (#lvar_0 == null))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Null"]]]]}, {"pp": "(! (#lvar_0 == undefined))", "ast": ["UnOp", ["Not"], ["BinOp", ["LVar", "#lvar_0"], ["Equal"], ["Lit", ["Undefined"]]]]}], "types": []}
+{"ev": "stats", "leaves": 14, "ends": {"returned": 14, "threw": 0, "truncated": 0, "unknown": 0, "unsupported": 0, "error": 0}, "infeasible": 0, "vanished": 0, "max_branch": 0, "fatal": null, "solver": {"unknown_assumed_sat": 0, "entail_unknown": 0, "encode_failures": 0}}

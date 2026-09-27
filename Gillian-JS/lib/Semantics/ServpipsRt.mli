@@ -90,7 +90,11 @@
       (section 4.5); names are checked against {!builtin_names}. Native GIL
       operations ([and or not = => typeof toNumber toString], and [ite] on
       booleans) are built directly; the others become [FuncApp] (their SMT
-      encoding is WP1's).
+      encoding is WP1's). The defined conversions [js.tostring],
+      [js.toboolean], [js.looseeq] (decision D-R2-2) are evaluated on
+      literal arguments and simplified for values of known type, in both
+      modes (under concrete execution a result that is not a literal is
+      [unsupported]).
     - [servpips_define(o, k, v)]: writes the data property [k] of [o]
       ([{d, v, true, true, true}]) directly (no [[Put]]) and adds [k] to
       [@sp_lazykeys]. [servpips_absent(o, k)]: writes a tombstone and removes
@@ -117,6 +121,32 @@
       the (finite) havoc value only; there are no +/-Infinity branches.
       Callers bound their numbers with sound range facts (lengths, dates,
       DynamoDB numbers, ...) so that no overflow is satisfiable.
+    - [servpips_conv(op, v [, w])] (JSIL runtime, decision D-R2-2): called
+      by [i__isPrimitive] (op ["isPrimitive"]), [i__toString] (["toString"]),
+      [i__toBoolean] (["toBoolean"]) and [i__abstractEquality]
+      (["looseEq"], two values). Returns [none] (the procedure continues as
+      upstream) without [--servpips], under concrete execution, for
+      literals and values of known type, and for a value that can be no
+      primitive other than [undefined]/[null] (e.g. an optional object).
+      Otherwise the value's JS type is a union that includes a primitive
+      type other than undefined/null, and the result is computed without
+      forking per type:
+      - ["isPrimitive"]: [true] where the value is primitive, [false]
+        where it is an object, [none] where it is not a JS value (at most
+        three branches);
+      - ["toString"]: where the value is primitive, [js.tostring(v)] (or [v]
+        itself if it can only be a string); [none] where it is not
+        primitive (ToPrimitive of an object calls its methods);
+      - ["toBoolean"]: [js.toboolean(v)] where the value is a JS value
+        (objects are true; no method is called, so objects do not fork);
+        [none] where it is not;
+      - ["looseEq"]: [a == null] / [a == undefined] is [(a = null) or (a =
+        undefined)] for any value (no fork); otherwise [js.looseeq(a, b)]
+        where both values are primitive, [none] where one is not (or
+        either is a non-finite number literal).
+      The builtins are those of [Smt.Servpips_functions] (design 4.5 table,
+      [`Defined]). Every branch condition is checked for satisfiability
+      first; a side found unsatisfiable is reported as a [prune] event.
     - [servpips_tonumber(s)] (JSIL [i__toNumber] on strings): literal ->
       concrete ToNumber; symbolic under [--servpips] -> the four branches of
       section 4.4 (NaN / +Infinity / -Infinity / [ToNumberOp s]) with their
