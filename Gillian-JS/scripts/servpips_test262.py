@@ -16,8 +16,8 @@ exactly:
     ("use strict"; + test262 harness + test), [raw] files run as they are;
   * positive tests must finish normally; negative parse/early tests must fail
     with a JS parser error ("Parsing error", not an EarlyError); negative
-    runtime tests must end in error mode (the upstream runner also checks the
-    class of the thrown value; the CLI cannot observe it, see below).
+    runtime tests must end in error mode (only the bulk mode also checks the
+    class of the thrown value, which the exec/wpst CLIs do not report).
 
 Modes (one run of gillian-js per test, in long-running containers of the
 engine image, --jobs of them in parallel):
@@ -30,17 +30,30 @@ engine image, --jobs of them in parallel):
                  --unroll 2000 --smt-timeout 5000   (the flags of run.js; all
                  inputs are concrete, so a conforming run has exactly one
                  `end` event)
+  wpst           gillian-js wpst <test> --unroll 2000 with SERVPIPS_FULL_INIT=1
+                 (the fork's symbolic engine without SERVPIPS mode, full ES5
+                 initial heap); a diagnostic mode, normally run with
+                 --tests-file on the tests that fail in wpst-servpips only
 
 In wpst mode (Cosette compilation) an uncaught exception in global code is
 reported as end{error, "main:<n>: Pure assertion failed: false"} (the global
 error assertion of the compiled main); it is the wpst counterpart of error
-mode.
+mode. A crash of the Cosette pre-parser (JS_PreParser.Unparseable, whose
+message also says "Parsing error") is its own class, preparser-crash, and
+never counts as the parse error of a negative test.
+
+Another image (e.g. one built from upstream master) is run with
+`run --image I --label L`; its results go to O/<mode>@L.jsonl and the report
+compares bulk@upstream / exec@upstream with bulk / exec.
 
 Subcommands:
   fetch   clone the suite:          fetch --dir D
   run     run one mode:             run --suite D --out O --mode M [--image I]
+                                    [--label L] [--tests-file F [--redo]]
   report  tables and diff lists:    report --out O
-  all     fetch (if needed) + the four modes + report
+  all     fetch (if needed); exec, bulk, exec-servpips, wpst-servpips; wpst
+          on the tests that pass under exec and fail under wpst-servpips;
+          report
 
 Timeouts: 180 s per test (900 s in wpst mode); `all` runs exec first and
 skips in the other modes the tests that time out under exec (they cannot be
@@ -66,7 +79,7 @@ TEST262_REPO = "https://github.com/GillianPlatform/javert-test262"
 TEST262_REV = "93e0d0b04093cabc3234a776eec5cc3e165f3b1a"  # upstream CI pin
 HARNESS_IN_IMAGE = "/opt/gillian/share/gillian-js/runtime/harness.js"
 WPST_ARGS = ["--unroll", "2000", "--smt-timeout", "5000"]  # as run.js
-MODES = ["bulk", "exec", "exec-servpips", "wpst-servpips"]
+MODES = ["bulk", "exec", "exec-servpips", "wpst-servpips", "wpst"]
 HERE = os.path.dirname(os.path.abspath(__file__))
 FILTERING_ML = os.path.join(HERE, "..", "lib", "Test262", "Test262_filtering.ml")
 
@@ -271,7 +284,11 @@ def classify_wpst(rc, out, neg, killed, n_ends, status, ends, stats):
     if stats is None:
         got, detail = ("no-stats(rc=%d)" % rc), tail(out, 400)
     elif fatal:
-        if "Parsing error" in fatal:
+        if "Unparseable" in fatal:
+            # JS_PreParser (Cosette Assert/Assume stringifier) crashed; its
+            # messages also say "Parsing error"
+            got = "preparser-crash"
+        elif "Parsing error" in fatal:
             got = "parse-error"
         elif "EarlyError" in fatal:
             got = "early-error"
@@ -325,6 +342,41 @@ def classify_bulk(rc, out, killed):
     return "fail", st[0], (m.group(1).strip() if m else tail(out, 400))[:400]
 
 
+def classify_wpst_upstream(rc, out, neg, killed):
+    text = out.decode("utf-8", "replace")
+    if killed:
+        return "fail", "timeout", ""
+    detail = ""
+    if rc == 0 and "Success!" in text:
+        got = "normal"
+    elif rc == 1 and "Errors occurred!" in text:
+        errs = re.findall(r"FAILURE TERMINATION: Procedure (\S+), Command \d+.*?\n\s*Errors: ([^\n]*)",
+                          text, re.S)
+        if errs and all(p == "main" and e.strip() == "Pure assertion failed: false"
+                        for p, e in errs):
+            got = "error-mode" if len(errs) == 1 else "multi-path(%d errors)" % len(errs)
+            detail = "%d x main: Pure assertion failed: false" % len(errs)
+        else:
+            got = "error"
+            detail = "; ".join("%s: %s" % (p, e.strip()[:150]) for p, e in errs[:3]) or tail(out, 400)
+    elif rc == 2:
+        got = "parse-error" if "Parsing error" in text else (
+            "early-error" if "EarlyError" in text else "compile-error")
+    elif rc == 125:
+        got = "internal-error"
+    else:
+        got = "rc=%d" % rc
+    if neg is None:
+        ok = got == "normal"
+    elif neg["phase"] in ("parse", "early"):
+        ok = got == "parse-error"
+    elif neg["phase"] == "runtime":
+        ok = got == "error-mode"
+    else:
+        ok = False
+    return ("pass" if ok else "fail"), got, ("" if ok else (detail or tail(out, 400)))
+
+
 def run_one(pool_name, mode, src, work, neg, timeout):
     os.makedirs(work, exist_ok=True)
     ev = os.path.join(work, "events.jsonl")
@@ -339,9 +391,12 @@ def run_one(pool_name, mode, src, work, neg, timeout):
     elif mode == "wpst-servpips":
         args = (["wpst", src, "--servpips", "--servpips-log", ev, "-l", "disabled",
                  "--result-dir", ".gillian"] + WPST_ARGS)
+    elif mode == "wpst":
+        args = ["wpst", src, "-l", "disabled", "--result-dir", ".gillian", "--unroll", "2000"]
     else:
         raise ValueError(mode)
-    cmd = (["docker", "exec", "-w", work, pool_name, "timeout", "-s", "KILL",
+    env = ["-e", "SERVPIPS_FULL_INIT=1"] if mode == "wpst" else []
+    cmd = (["docker", "exec", "-w", work] + env + [pool_name, "timeout", "-s", "KILL",
             str(timeout), "gillian-js"] + args)
     t0 = time.time()
     p = subprocess.run(cmd, capture_output=True)
@@ -349,7 +404,9 @@ def run_one(pool_name, mode, src, work, neg, timeout):
     out = p.stdout + p.stderr
     killed = p.returncode == 137 or p.returncode == -9
     rec = {"rc": p.returncode, "secs": round(secs, 3)}
-    if mode.startswith("wpst"):
+    if mode == "wpst":
+        v, c, d = classify_wpst_upstream(p.returncode, out, neg, killed)
+    elif mode == "wpst-servpips":
         n_ends, status, ends, stats = parse_events(ev)
         v, c, d = classify_wpst(p.returncode, out, neg, killed, n_ends, status, ends, stats)
         rec.update({"n_ends": n_ends, "ends": status, "stats": stats})
@@ -374,6 +431,11 @@ def cmd_run(a):
     key = a.mode + ("@" + a.label if a.label else "")
     res_path = os.path.join(out, key + ".jsonl")
     done = set()
+    if a.redo and a.tests_file and os.path.exists(res_path):
+        # drop the earlier records of the listed tests, they are run again
+        wanted = set(l.strip() for l in open(a.tests_file) if l.strip())
+        keep = [l for l in open(res_path) if json.loads(l)["test"] not in wanted]
+        open(res_path, "w").writelines(keep)
     if os.path.exists(res_path) and not a.fresh:
         for line in open(res_path):
             try:
@@ -383,6 +445,9 @@ def cmd_run(a):
     elif os.path.exists(res_path):
         os.remove(res_path)
     todo = [t for t in tests if t[0] not in done]
+    if a.tests_file:
+        wanted = set(l.strip() for l in open(a.tests_file) if l.strip())
+        todo = [t for t in todo if t[0] in wanted]
     ref = load(out, a.ref) if a.ref else {}
     skipped = []
     if a.ref and a.skip_ref_timeouts:
@@ -497,8 +562,22 @@ def cmd_report(a):
         w("| %s | %d | %d | %d | %d | %s |" % (m, len(R[m]), c["pass"], c["fail"], c["skip"],
                                          ", ".join("%s %d" % kv for kv in cls.most_common())))
     in_fail = lambda t: any(s in t for s in failing)
-    w("\n(`failing_tests` of Test262_filtering.ml, expected to fail and filtered by `--ci`: %d of the run tests.)\n"
-      % sum(1 for t in tests if in_fail(t)))
+    w("\n(Run tests matching a `failing_tests` pattern of Test262_filtering.ml, which `--ci` "
+      "filters out: %d.)\n" % sum(1 for t in tests if in_fail(t)))
+    w("## Failure clusters (class and normalised detail)\n")
+    w("| mode | count | class | detail (numbers replaced by N) | example |")
+    w("|---|---|---|---|---|")
+    for m in modes:
+        cl, ex = collections.Counter(), {}
+        for t, r in R[m].items():
+            if r["verdict"] != "fail":
+                continue
+            d = re.sub(r"(?<![A-Za-z$])\d+(\.\d+)?", "N", (r.get("detail") or "").replace("\n", " "))
+            k = (re.sub(r"\(.*", "(..)", r["class"]), d[:110].replace("|", "\\|"))
+            cl[k] += 1
+            ex.setdefault(k, t)
+        for k, c in cl.most_common():
+            w("| %s | %d | %s | %s | %s |" % (m, c, k[0], k[1], ex[k]))
 
     w("## Per folder (pass / run)\n")
     w("| folder | " + " | ".join(modes) + " |")
@@ -546,11 +625,12 @@ def cmd_report(a):
         w("\n## %s: %d\n" % (title, len(diff)))
         if not diff:
             continue
-        w("| test | %s | %s |" % (m1, m2))
-        w("|---|---|---|")
+        extra = [m for m in ("wpst",) if m in R and "wpst-servpips" in (m1, m2)]
+        w("| test | %s |" % " | ".join([m1, m2] + extra))
+        w("|---|---|---|" + "---|" * len(extra))
         for t in diff:
-            w("| %s%s | %s | %s |" % (t, " (failing_tests)" if in_fail(t) else "",
-                                      desc(m1, t), desc(m2, t)))
+            w("| %s%s | %s |" % (t, " (failing_tests)" if in_fail(t) else "",
+                                 " | ".join(desc(m, t) for m in [m1, m2] + extra)))
     # timing
     w("\n## Time per test (seconds)\n")
     w("| mode | total | median | p99 | max | slowest |")
@@ -588,6 +668,15 @@ def cmd_all(a):
     for m in ("bulk", "exec-servpips", "wpst-servpips"):
         cmd_run(argparse.Namespace(**dict(vars(a), mode=m, ref="exec", label=None,
                                           skip_ref_timeouts=True)))
+    # diagnosis: the fork's wpst without SERVPIPS mode on the tests that pass
+    # under exec and fail under wpst --servpips
+    R1, R2 = load(a.out, "exec"), load(a.out, "wpst-servpips")
+    diag = sorted(t for t in R2 if R2[t]["verdict"] == "fail"
+                  and R1.get(t, {}).get("verdict") == "pass")
+    tf = os.path.join(a.out, "wpst-diagnosis.tests")
+    open(tf, "w").write("".join(t + "\n" for t in diag))
+    cmd_run(argparse.Namespace(**dict(vars(a), mode="wpst", ref=None, label=None,
+                                      tests_file=tf)))
     cmd_report(a)
 
 
@@ -614,6 +703,10 @@ def main():
                        help="skip (record as skip) the tests that timed out under --ref")
         p.add_argument("--only", action="append", help="path substring (repeatable)")
         p.add_argument("--limit", type=int, default=0)
+        p.add_argument("--tests-file", default=None,
+                       help="only the tests listed (paths relative to test/, one per line)")
+        p.add_argument("--redo", action="store_true",
+                       help="with --tests-file: run the listed tests again")
         if name == "run":
             p.add_argument("--mode", required=True, choices=MODES)
             p.add_argument("--label", default=None,
