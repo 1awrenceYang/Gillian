@@ -1397,7 +1397,41 @@ struct
            when the guard mentions logical variables. Must be called before
            [state] is modified by [State.assume]. *)
         let servpips_prune ~kept ~by =
-          if Servpips.enabled () then
+          (* SERVPIPS (E19): most guards decided by reduction mention no
+             logical variable, neither directly nor through the store: that
+             is checked first, without building the substituted guard *)
+          let rec has_lvar (e : Expr.t) =
+            match e with
+            | LVar _ -> true
+            | Lit _ | PVar _ | ALoc _ -> false
+            | UnOp (_, e) -> has_lvar e
+            | BinOp (a, _, b) -> has_lvar a || has_lvar b
+            | LstSub (a, b, c) -> has_lvar a || has_lvar b || has_lvar c
+            | NOp (_, l) | EList l | ESet l | ConstructorApp (_, l) | FuncApp (_, l)
+              -> List.exists has_lvar l
+            | Exists _ | ForAll _ | Cases _ ->
+                not (SS.is_empty (Expr.lvars e))
+          in
+          let rec guard_has_lvar (e : Expr.t) =
+            match e with
+            | PVar x -> (
+                match Store.get (State.get_store state) x with
+                | Some v -> has_lvar (Val.to_expr v)
+                | None -> false)
+            | LVar _ -> true
+            | Lit _ | ALoc _ -> false
+            | UnOp (_, e) -> guard_has_lvar e
+            | BinOp (a, _, b) -> guard_has_lvar a || guard_has_lvar b
+            | LstSub (a, b, c) ->
+                guard_has_lvar a || guard_has_lvar b || guard_has_lvar c
+            | NOp (_, l) | EList l | ESet l | ConstructorApp (_, l) | FuncApp (_, l)
+              -> List.exists guard_has_lvar l
+            | Exists _ | ForAll _ | Cases _ -> true
+          in
+          if
+            Servpips.enabled ()
+            && (has_lvar (Val.to_expr vt) || guard_has_lvar e)
+          then
             let guard_orig =
               (* substitute only the program variables of the guard *)
               let store = State.get_store state in
