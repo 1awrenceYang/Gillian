@@ -6,6 +6,11 @@ module GProc = Gillian.Gil_syntax.Proc
 module Literal = Gillian.Gil_syntax.Literal
 module Annot = Gillian.Gil_syntax.Annot
 
+(* SERVPIPS: link and register the WP3 externs (servpips_site, emit, fresh,
+   assume, fn, define, absent, mark, is_concrete, arith, tonumber,
+   rejected); see ServpipsRt.mli. *)
+let () = ServpipsRt.init ()
+
 (** JSIL external procedure calls *)
 module M
     (Val : Val.S)
